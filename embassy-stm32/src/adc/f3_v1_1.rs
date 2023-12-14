@@ -4,7 +4,6 @@ use core::task::Poll;
 
 use embassy_futures::yield_now;
 use embassy_hal_internal::into_ref;
-use embassy_time::Instant;
 
 use super::Resolution;
 use crate::adc::{Adc, AdcPin, Instance, SampleTime};
@@ -12,11 +11,7 @@ use crate::interrupt::typelevel::Interrupt;
 use crate::time::Hertz;
 use crate::{interrupt, Peripheral};
 
-const ADC_FREQ: Hertz = crate::rcc::HSI_FREQ;
-
-pub const VDDA_CALIB_MV: u32 = 3300;
-pub const ADC_MAX: u32 = (1 << 12) - 1;
-pub const VREF_INT: u32 = 1230;
+const ADC_BASE_FREQ: Hertz = crate::rcc::HSI_FREQ;
 
 pub enum AdcPowerMode {
     AlwaysOn,
@@ -93,21 +88,21 @@ pub struct Calibration {
 
 impl Calibration {
     /// The millivolts that the calibration value was measured at
-    pub const CALIBRATION_UV: u32 = 3_000_000;
+    pub const CALIBRATION_MV: u32 = 3_000;
 
     /// Returns the measured VddA in microvolts (uV)
     pub fn vdda_uv(&self) -> u32 {
-        (Self::CALIBRATION_UV * self.vref_cal as u32) / self.vref_val as u32
+        (Self::CALIBRATION_MV * 100 * self.vref_cal as u32) / self.vref_val as u32 * 10
     }
 
     /// Returns the measured VddA as an f32
     pub fn vdda_f32(&self) -> f32 {
-        (Self::CALIBRATION_UV as f32 / 1_000.0) * (self.vref_cal as f32 / self.vref_val as f32)
+        Self::CALIBRATION_MV as f32 * self.vref_cal as f32 / self.vref_val as f32 / 1_000.0
     }
 
     /// Returns a calibrated voltage value as in microvolts (uV)
     pub fn cal_uv(&self, raw: u16, resolution: super::Resolution) -> u32 {
-        (self.vdda_uv() / resolution.to_max_count()) * raw as u32
+        ((self.vdda_uv() / 4) * raw as u32 / resolution.to_max_count()) * 4
     }
 
     /// Returns a calibrated voltage value as an f32
@@ -158,7 +153,7 @@ impl<'d, T: Instance> Adc<'d, T> {
 
     fn freq() -> Hertz {
         let div = T::regs().ccr().read().adcpre() + 1;
-        ADC_FREQ / div as u32
+        ADC_BASE_FREQ / div as u32
     }
 
     pub async fn set_resolution(&mut self, res: Resolution) {
@@ -190,7 +185,7 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     pub fn enable_temperature(&self) -> Temperature<T> {
-        T::regs().ccr().modify(|w| w.set_tsvrefe(true));
+        update_vref::<T>(1);
 
         Temperature::<T>(core::marker::PhantomData)
     }
@@ -240,36 +235,21 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     pub async fn start_adc(&self) {
-        //defmt::trace!("Turn ADC on");
         T::regs().cr2().modify(|w| w.set_adon(true));
-        //defmt::trace!("Waiting for ADC to turn on");
-
-        let mut t = Instant::now();
 
         while !T::regs().sr().read().adons() {
             yield_now().await;
-            if t.elapsed() > embassy_time::Duration::from_millis(1000) {
-                t = Instant::now();
-                //defmt::trace!("ADC still not on");
-            }
         }
-
-        //defmt::trace!("ADC on");
     }
 
     pub async fn stop_adc(&self) {
         if T::regs().cr2().read().adon() {
-            //defmt::trace!("ADC should be on, wait for it to start");
             while !T::regs().csr().read().adons1() {
                 yield_now().await;
             }
         }
 
-        //defmt::trace!("Turn ADC off");
-
         T::regs().cr2().modify(|w| w.set_adon(false));
-
-        //defmt::trace!("Waiting for ADC to turn off");
 
         while T::regs().csr().read().adons1() {
             yield_now().await;
