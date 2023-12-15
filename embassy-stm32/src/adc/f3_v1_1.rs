@@ -92,7 +92,7 @@ impl Calibration {
 
     /// Returns the measured VddA in microvolts (uV)
     pub fn vdda_uv(&self) -> u32 {
-        ((Self::CALIBRATION_MV * 8 * self.vref_cal as u32) / self.vref_val as u32) * 125
+        (core::hint::black_box(Self::CALIBRATION_MV * 8 * self.vref_cal as u32) / self.vref_val as u32) * 125
     }
 
     /// Returns the measured VddA as an f32
