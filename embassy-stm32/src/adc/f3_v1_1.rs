@@ -92,7 +92,7 @@ impl Calibration {
 
     /// Returns the measured VddA in microvolts (uV)
     pub fn vdda_uv(&self) -> u32 {
-        (Self::CALIBRATION_MV * 100 * self.vref_cal as u32) / self.vref_val as u32 * 10
+        ((Self::CALIBRATION_MV * 8 * self.vref_cal as u32) / self.vref_val as u32) * 125
     }
 
     /// Returns the measured VddA as an f32
@@ -102,7 +102,7 @@ impl Calibration {
 
     /// Returns a calibrated voltage value as in microvolts (uV)
     pub fn cal_uv(&self, raw: u16, resolution: super::Resolution) -> u32 {
-        ((self.vdda_uv() / 4) * raw as u32 / resolution.to_max_count()) * 4
+        ((self.vdda_uv() / 8) * raw as u32 / resolution.to_max_count()) * 8
     }
 
     /// Returns a calibrated voltage value as an f32
