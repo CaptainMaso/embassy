@@ -14,6 +14,8 @@ mod ring_buffer;
 
 pub mod blocking_mutex;
 pub mod channel;
+mod debug_cell;
+pub mod intrusive_list;
 pub mod mutex;
 pub mod pipe;
 pub mod priority_channel;

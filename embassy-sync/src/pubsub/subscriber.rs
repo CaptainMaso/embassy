@@ -117,23 +117,17 @@ impl<'a, T: Clone> DerefMut for DynSubscriber<'a, T> {
 }
 
 /// A subscriber that holds a generic reference to the channel
-pub struct Subscriber<'a, M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize>(
-    pub(super) Sub<'a, PubSubChannel<M, T, CAP, SUBS, PUBS>, T>,
-);
+pub struct Subscriber<'a, M: RawMutex, T: Clone, const CAP: usize>(pub(super) Sub<'a, PubSubChannel<M, T, CAP>, T>);
 
-impl<'a, M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> Deref
-    for Subscriber<'a, M, T, CAP, SUBS, PUBS>
-{
-    type Target = Sub<'a, PubSubChannel<M, T, CAP, SUBS, PUBS>, T>;
+impl<'a, M: RawMutex, T: Clone, const CAP: usize> Deref for Subscriber<'a, M, T, CAP> {
+    type Target = Sub<'a, PubSubChannel<M, T, CAP>, T>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<'a, M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> DerefMut
-    for Subscriber<'a, M, T, CAP, SUBS, PUBS>
-{
+impl<'a, M: RawMutex, T: Clone, const CAP: usize> DerefMut for Subscriber<'a, M, T, CAP> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

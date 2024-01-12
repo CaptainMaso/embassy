@@ -12,7 +12,7 @@ use self::publisher::{ImmediatePub, Pub};
 use self::subscriber::Sub;
 use crate::blocking_mutex::raw::RawMutex;
 use crate::blocking_mutex::Mutex;
-use crate::waitqueue::MultiWakerRegistration;
+use crate::waitqueue::MultiWakerRegistrar;
 
 pub mod publisher;
 pub mod subscriber;
@@ -71,65 +71,56 @@ pub use subscriber::{DynSubscriber, Subscriber};
 /// # block_on(test);
 /// ```
 ///
-pub struct PubSubChannel<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> {
-    inner: Mutex<M, RefCell<PubSubState<T, CAP, SUBS, PUBS>>>,
+pub struct PubSubChannel<M: RawMutex, T: Clone, const CAP: usize> {
+    state: Mutex<M, RefCell<PubSubState<T, CAP>>>,
+    /// Collection of wakers for Subscribers that are waiting.  
+    subscriber_wakers: MultiWakerRegistrar,
+    /// Collection of wakers for Publishers that are waiting.  
+    publisher_wakers: MultiWakerRegistrar,
 }
 
-impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize>
-    PubSubChannel<M, T, CAP, SUBS, PUBS>
-{
+impl<M: RawMutex, T: Clone, const CAP: usize> PubSubChannel<M, T, CAP> {
     /// Create a new channel
     pub const fn new() -> Self {
         Self {
-            inner: Mutex::const_new(M::INIT, RefCell::new(PubSubState::new())),
+            state: Mutex::const_new(M::INIT, RefCell::new(PubSubState::new())),
+            subscriber_wakers: MultiWakerRegistrar::new(),
+            publisher_wakers: MultiWakerRegistrar::new(),
         }
     }
 
     /// Create a new subscriber. It will only receive messages that are published after its creation.
     ///
     /// If there are no subscriber slots left, an error will be returned.
-    pub fn subscriber(&self) -> Result<Subscriber<M, T, CAP, SUBS, PUBS>, Error> {
-        self.inner.lock(|inner| {
+    pub fn subscriber(&self) -> Subscriber<M, T, CAP> {
+        self.state.lock(|inner| {
             let mut s = inner.borrow_mut();
 
-            if s.subscriber_count >= SUBS {
-                Err(Error::MaximumSubscribersReached)
-            } else {
-                s.subscriber_count += 1;
-                Ok(Subscriber(Sub::new(s.next_message_id, self)))
-            }
+            s.subscriber_count += 1;
+            Subscriber(Sub::new(s.next_message_id, self))
         })
     }
 
     /// Create a new subscriber. It will only receive messages that are published after its creation.
     ///
     /// If there are no subscriber slots left, an error will be returned.
-    pub fn dyn_subscriber(&self) -> Result<DynSubscriber<'_, T>, Error> {
-        self.inner.lock(|inner| {
+    pub fn dyn_subscriber(&self) -> DynSubscriber<'_, T> {
+        self.state.lock(|inner| {
             let mut s = inner.borrow_mut();
 
-            if s.subscriber_count >= SUBS {
-                Err(Error::MaximumSubscribersReached)
-            } else {
-                s.subscriber_count += 1;
-                Ok(DynSubscriber(Sub::new(s.next_message_id, self)))
-            }
+            s.subscriber_count += 1;
+            DynSubscriber(Sub::new(s.next_message_id, self))
         })
     }
 
     /// Create a new publisher
     ///
     /// If there are no publisher slots left, an error will be returned.
-    pub fn publisher(&self) -> Result<Publisher<M, T, CAP, SUBS, PUBS>, Error> {
-        self.inner.lock(|inner| {
+    pub fn publisher(&self) -> Result<Publisher<M, T, CAP>, Error> {
+        self.state.lock(|inner| {
             let mut s = inner.borrow_mut();
-
-            if s.publisher_count >= PUBS {
-                Err(Error::MaximumPublishersReached)
-            } else {
-                s.publisher_count += 1;
-                Ok(Publisher(Pub::new(self)))
-            }
+            s.publisher_count += 1;
+            Ok(Publisher(Pub::new(self)))
         })
     }
 
@@ -137,21 +128,16 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
     ///
     /// If there are no publisher slots left, an error will be returned.
     pub fn dyn_publisher(&self) -> Result<DynPublisher<'_, T>, Error> {
-        self.inner.lock(|inner| {
+        self.state.lock(|inner| {
             let mut s = inner.borrow_mut();
-
-            if s.publisher_count >= PUBS {
-                Err(Error::MaximumPublishersReached)
-            } else {
-                s.publisher_count += 1;
-                Ok(DynPublisher(Pub::new(self)))
-            }
+            s.publisher_count += 1;
+            Ok(DynPublisher(Pub::new(self)))
         })
     }
 
     /// Create a new publisher that can only send immediate messages.
     /// This kind of publisher does not take up a publisher slot.
-    pub fn immediate_publisher(&self) -> ImmediatePublisher<M, T, CAP, SUBS, PUBS> {
+    pub fn immediate_publisher(&self) -> ImmediatePublisher<M, T, CAP> {
         ImmediatePublisher(ImmediatePub::new(self))
     }
 
@@ -162,11 +148,9 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
     }
 }
 
-impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> PubSubBehavior<T>
-    for PubSubChannel<M, T, CAP, SUBS, PUBS>
-{
+impl<M: RawMutex, T: Clone, const CAP: usize> PubSubBehavior<T> for PubSubChannel<M, T, CAP> {
     fn get_message_with_context(&self, next_message_id: &mut u64, cx: Option<&mut Context<'_>>) -> Poll<WaitResult<T>> {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let mut s = s.borrow_mut();
 
             // Check if we can read a message
@@ -179,7 +163,7 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
                 // No, so we need to reregister our waker and sleep again
                 None => {
                     if let Some(cx) = cx {
-                        s.subscriber_wakers.register(cx.waker());
+                        self.subscriber_wakers.register(cx.waker());
                     }
                     Poll::Pending
                 }
@@ -193,11 +177,11 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
     }
 
     fn available(&self, next_message_id: u64) -> u64 {
-        self.inner.lock(|s| s.borrow().next_message_id - next_message_id)
+        self.state.lock(|s| s.borrow().next_message_id - next_message_id)
     }
 
     fn publish_with_context(&self, message: T, cx: Option<&mut Context<'_>>) -> Result<(), T> {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let mut s = s.borrow_mut();
             // Try to publish the message
             match s.try_publish(message) {
@@ -215,28 +199,28 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
     }
 
     fn publish_immediate(&self, message: T) {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let mut s = s.borrow_mut();
             s.publish_immediate(message)
         })
     }
 
     fn space(&self) -> usize {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let s = s.borrow();
             s.queue.capacity() - s.queue.len()
         })
     }
 
     fn unregister_subscriber(&self, subscriber_next_message_id: u64) {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let mut s = s.borrow_mut();
             s.unregister_subscriber(subscriber_next_message_id)
         })
     }
 
     fn unregister_publisher(&self) {
-        self.inner.lock(|s| {
+        self.state.lock(|s| {
             let mut s = s.borrow_mut();
             s.unregister_publisher()
         })
@@ -244,31 +228,25 @@ impl<M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usi
 }
 
 /// Internal state for the PubSub channel
-struct PubSubState<T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> {
+struct PubSubState<T: Clone, const CAP: usize> {
     /// The queue contains the last messages that have been published and a countdown of how many subscribers are yet to read it
     queue: Deque<(T, usize), CAP>,
     /// Every message has an id.
     /// Don't worry, we won't run out.
     /// If a million messages were published every second, then the ID's would run out in about 584942 years.
     next_message_id: u64,
-    /// Collection of wakers for Subscribers that are waiting.  
-    subscriber_wakers: MultiWakerRegistration<SUBS>,
-    /// Collection of wakers for Publishers that are waiting.  
-    publisher_wakers: MultiWakerRegistration<PUBS>,
     /// The amount of subscribers that are active
     subscriber_count: usize,
     /// The amount of publishers that are active
     publisher_count: usize,
 }
 
-impl<T: Clone, const CAP: usize, const SUBS: usize, const PUBS: usize> PubSubState<T, CAP, SUBS, PUBS> {
+impl<T: Clone, const CAP: usize> PubSubState<T, CAP> {
     /// Create a new internal channel state
     const fn new() -> Self {
         Self {
             queue: Deque::new(),
             next_message_id: 0,
-            subscriber_wakers: MultiWakerRegistration::new(),
-            publisher_wakers: MultiWakerRegistration::new(),
             subscriber_count: 0,
             publisher_count: 0,
         }
