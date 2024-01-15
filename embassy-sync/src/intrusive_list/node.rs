@@ -1,8 +1,7 @@
 use core::pin::Pin;
 
+use super::*;
 use crate::{blocking_mutex::raw::RawMutex, debug_cell::DebugCell};
-
-use super::{raw::ListLock, RawIntrusiveList};
 
 pub struct Node<T> {
     data: DebugCell<T>,
@@ -98,8 +97,8 @@ impl<T> NodeRef<T> {
     /// registered `(Raw)IntrusiveList`, otherwise it will
     /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_node<'l>(&'l self, lock: &'l ListLock) -> &'l Node<T> {
-        lock.
+    pub fn get_node<'l>(&'l self, lock: &'l ListLock<'_>) -> &'l Node<T> {
+        lock.valididate_ptr(self.list_ptr);
         unsafe { self.get_node_unchecked() }
     }
 
@@ -119,8 +118,8 @@ impl<T> NodeRef<T> {
     /// registered `(Raw)IntrusiveList`, otherwise it will
     /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_data<'l>(&'l self, lock: &'l ListLock) -> impl core::ops::Deref<Target = T> + 'l {
-        self.validate_lock(lock);
+    pub fn get_data<'l>(&'l self, lock: &'l ListLock<'_>) -> impl core::ops::Deref<Target = T> + 'l {
+        lock.valididate_ptr(self.list_ptr);
         // SAFETY: If the lock is valid, there should never be any
         // overlapping mutable references.
         unsafe { self.get_data_unchecked() }
@@ -142,8 +141,8 @@ impl<T> NodeRef<T> {
     /// registered `(Raw)IntrusiveList`, otherwise it will
     /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_data_mut<'l>(&'l self, lock: &'l mut ListLock) -> impl core::ops::DerefMut<Target = T> + '_ {
-        self.validate_lock(lock);
+    pub fn get_data_mut<'l>(&'l self, lock: &'l mut ListLock<'_>) -> impl core::ops::DerefMut<Target = T> + '_ {
+        lock.valididate_ptr(self.list_ptr);
 
         // SAFETY: If the lock is valid, there should never be any
         // overlapping references.
@@ -166,8 +165,8 @@ impl<T> NodeRef<T> {
     /// registered `(Raw)IntrusiveList`, otherwise it will
     /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_next(&self, lock: &ListLock) -> Option<NodeRef<T>> {
-        self.validate_lock(lock);
+    pub fn get_next(&self, lock: &ListLock<'_>) -> Option<NodeRef<T>> {
+        lock.valididate_ptr(self.list_ptr);
 
         // SAFETY: If the lock is valid, there should never be any
         // overlapping references.
@@ -192,8 +191,9 @@ impl<T> NodeRef<T> {
     #[inline(always)]
     pub fn get_next_mut<'l>(
         &'l self,
-        lock: &'l mut ListLock,
+        lock: &'l mut ListLock<'_>,
     ) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
+        lock.valididate_ptr(self.list_ptr);
         let n = self.get_node(lock);
         unsafe { n.get_next_mut() }
     }

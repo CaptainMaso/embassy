@@ -5,17 +5,26 @@ use crate::{blocking_mutex::raw::RawMutex, debug_cell::DebugCell};
 use super::*;
 
 #[derive(Debug)]
-pub struct ListLock {
+pub(super) struct RawListLock {
     #[allow(dead_code)]
     #[cfg(debug_assertions)]
     list_ptr: *const (),
 }
 
-impl ListLock {
-    pub(super) fn validate<T>(&self, list: RawIntrusiveList<T>) {
+impl RawListLock {
+    #[inline(always)]
+    pub(super) fn validate<T>(&self, list: &RawIntrusiveList<T>) {
         #[cfg(debug_assertions)]
         {
-            let list_ptr = (self as *const Self).cast();
+            let list_ptr = (list as *const RawIntrusiveList<T>).cast();
+            self.validate_ptr(list_ptr)
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn validate_ptr(&self, list_ptr: *const ()) {
+        #[cfg(debug_assertions)]
+        {
             if self.list_ptr != list_ptr {
                 panic!("List lock invalid this list")
             }
@@ -40,8 +49,8 @@ impl<T> RawIntrusiveList<T> {
     /// SAFETY: Asserts that the caller currently has a unique reference to the
     /// `RawIntrusiveList`.
     #[inline(always)]
-    pub const unsafe fn get_lock(&self) -> ListLock {
-        ListLock {
+    pub const unsafe fn get_lock(&self) -> RawListLock {
+        RawListLock {
             #[cfg(debug_assertions)]
             list_ptr: (self as *const Self).cast(),
         }

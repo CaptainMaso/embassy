@@ -2,45 +2,28 @@ use core::task::Waker;
 
 use crate::{
     blocking_mutex::raw::RawMutex,
-    intrusive_list::{NodeRef, RawIntrusiveList},
+    intrusive_list::{IntrusiveList, Node, NodeRef},
 };
 
 /// Utility struct to register and wake multiple wakers.
-pub struct MultiWakerRegistrar {
-    wakers: RawIntrusiveList<Waker>,
+pub struct MultiWakerRegistrar<M> {
+    wakers: IntrusiveList<Waker, M>,
 }
 
-impl MultiWakerRegistrar {
+impl<M: RawMutex> MultiWakerRegistrar<M> {
     /// Create a new empty instance
     pub const fn new() -> Self {
         Self {
-            wakers: RawIntrusiveList::new(),
+            wakers: IntrusiveList::new(),
         }
     }
 
+    fn proj_wakers(self: core::pin::Pin<&Self>) -> core::pin::Pin<&IntrusiveList<Waker, M>> {}
+
     /// Register a waker. If the buffer is full the function returns it in the error
-    pub fn register<'a>(&self, w: &'a Waker) {
-        // // If we already have some waker that wakes the same task as `w`, do nothing.
-        // // This avoids cloning wakers, and avoids unnecessary mass-wakes.
-        // for w2 in &self.wakers {
-        //     if w.will_wake(w2) {
-        //         return;
-        //     }
-        // }
-
-        // if self.wakers.is_full() {
-        //     // All waker slots were full. It's a bit inefficient, but we can wake everything.
-        //     // Any future that is still active will simply reregister.
-        //     // This won't happen a lot, so it's ok.
-        //     self.wake();
-        // }
-
-        // if self.wakers.push(w.clone()).is_err() {
-        //     // This can't happen unless N=0
-        //     // (Either `wakers` wasn't full, or it was in which case `wake()` empied it)
-        //     panic!("tried to push a waker to a zero-length MultiWakerRegistration")
-        // }
-        todo!()
+    pub fn register<'a>(self: core::pin::Pin<&'a Self>, w: &'a MultiWakerStorage<'_>) {
+        let l = self.proj_wakers();
+        l.with_lock(|lock| if l.any(|o| w.node.will_wake(o), lock) {})
     }
 
     /// Wake all registered wakers. This clears the buffer
@@ -64,4 +47,12 @@ impl MultiWakerRegistrar {
     }
 }
 
-pub struct MultiWakerStorage {}
+pub struct MultiWakerStorage<'a> {
+    node: Node<&'a Waker>,
+}
+
+impl<'a> MultiWakerStorage<'a> {
+    pub fn new(waker: &'a Waker) -> Self {
+        Self { node: Node::new(waker) }
+    }
+}

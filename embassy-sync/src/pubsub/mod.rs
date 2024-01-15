@@ -74,9 +74,9 @@ pub use subscriber::{DynSubscriber, Subscriber};
 pub struct PubSubChannel<M: RawMutex, T: Clone, const CAP: usize> {
     state: Mutex<M, RefCell<PubSubState<T, CAP>>>,
     /// Collection of wakers for Subscribers that are waiting.  
-    subscriber_wakers: MultiWakerRegistrar,
+    subscriber_wakers: MultiWakerRegistrar<M>,
     /// Collection of wakers for Publishers that are waiting.  
-    publisher_wakers: MultiWakerRegistrar,
+    publisher_wakers: MultiWakerRegistrar<M>,
 }
 
 impl<M: RawMutex, T: Clone, const CAP: usize> PubSubChannel<M, T, CAP> {
