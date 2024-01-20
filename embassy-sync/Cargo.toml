@@ -16,7 +16,7 @@ categories = [
 [package.metadata.embassy_docs]
 src_base = "https://github.com/embassy-rs/embassy/blob/embassy-sync-v$VERSION/embassy-sync/src/"
 src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-sync/src/"
-target = "thumbv7em-none-eabi"
+#target = "thumbv7em-none-eabi"
 
 [features]
 std = []
@@ -31,6 +31,7 @@ critical-section = "1.1"
 heapless = "0.8"
 cfg-if = "1.0.0"
 embedded-io-async = { version = "0.6.1" }
+pin-project = "1"
 
 [dev-dependencies]
 futures-executor = { version = "0.3.17", features = [ "thread-pool" ] }

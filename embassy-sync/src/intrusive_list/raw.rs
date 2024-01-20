@@ -5,7 +5,7 @@ use crate::{blocking_mutex::raw::RawMutex, debug_cell::DebugCell};
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct RawListLock {
+pub struct RawListLock {
     #[allow(dead_code)]
     #[cfg(debug_assertions)]
     list_ptr: *const (),
@@ -34,12 +34,14 @@ impl RawListLock {
 
 pub struct RawIntrusiveList<T> {
     head: DebugCell<Option<NodeRef<T>>>,
+    tail: DebugCell<Option<NodeRef<T>>>,
 }
 
 impl<T> RawIntrusiveList<T> {
     pub const fn new() -> Self {
         Self {
             head: DebugCell::new(None),
+            tail: DebugCell::new(None),
         }
     }
 
@@ -71,74 +73,79 @@ impl<T> RawIntrusiveList<T> {
     }
 
     #[inline]
-    pub unsafe fn push_head<'a, M: RawMutex>(
-        self: Pin<&'a Self>,
-        lock: Pin<&'a M>,
-        node: Pin<&'a Node<T>>,
-    ) -> NodeGuard<'a, T, M> {
+    pub unsafe fn push_head<'a, M: RawMutex>(&'a self, lock: &'a M, node: Pin<&'a Node<T>>) -> NodeGuard<'a, T, M> {
         let guard = NodeGuard { lock, list: self, node };
-        let old_node = self.head_mut().replace(guard.get_ref());
-        *guard.get_ref().get_next_mut_unchecked() = old_node;
-        guard
-    }
-
-    #[inline]
-    pub unsafe fn push_tail<'a, M: RawMutex>(
-        self: Pin<&'a Self>,
-        lock: Pin<&'a M>,
-        node: Pin<&'a Node<T>>,
-    ) -> NodeGuard<'a, T, M> {
-        let guard = NodeGuard { list: self, lock, node };
-
-        if let Some(first_node) = self.head() {
-            let mut next_node = first_node;
-            loop {
-                if let Some(next) = next_node.get_next_unchecked() {
-                    next_node = next;
-                } else {
-                    *next_node.get_next_mut_unchecked() = Some(guard.get_ref());
-                    break;
-                }
-            }
+        let guard_ref = guard.get_ref();
+        let old_head = self.head_mut().replace(guard_ref);
+        *guard_ref.get_next_mut_unchecked() = old_head;
+        if let Some(old_head) = old_head {
+            *old_head.get_prev_mut_unchecked() = Some(guard_ref);
         } else {
-            *self.head_mut() = Some(guard.get_ref());
+            *self.tail_mut() = Some(guard_ref);
         }
         guard
     }
 
+    /// Returns a reference to the tail of the list
+    ///
+    /// SAFETY: Requires the caller to ensure that no mutable references
+    /// exist to the list.
     #[inline]
-    pub(super) unsafe fn deregister<M: RawMutex>(self: Pin<&Self>, node: &mut NodeGuard<'_, T, M>) {
-        let node_ptr = node.get_ref();
+    pub unsafe fn tail(&self) -> Option<NodeRef<T>> {
+        *self.tail.borrow()
+    }
 
-        let first_node = self.head();
-        if let Some(first_node) = first_node {
-            let mut prev_node = None;
-            let mut next_node = first_node;
-            let prev_node = loop {
-                if next_node == node_ptr {
-                    break prev_node;
-                }
+    #[inline]
+    pub unsafe fn tail_mut<'l>(&'l self) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
+        self.tail.borrow_mut()
+    }
 
-                if let Some(next) = next_node.get_next_unchecked() {
-                    prev_node = Some(next_node);
-                    next_node = next;
-                } else {
-                    // Reached end without finding node
-                    return;
-                }
-            };
+    #[inline]
+    pub unsafe fn push_tail<'s, 'n, 'g, M: RawMutex>(
+        &'s self,
+        lock: &'s M,
+        node: Pin<&'n Node<T>>,
+    ) -> NodeGuard<'g, T, M>
+    where
+        's: 'g,
+        'n: 'g,
+    {
+        let guard = NodeGuard { lock, list: self, node };
+        let guard_ref = guard.get_ref();
+        let old_tail = self.tail_mut().replace(guard_ref);
+        *guard_ref.get_prev_mut_unchecked() = old_tail;
+        if let Some(old_tail) = old_tail {
+            *old_tail.get_next_mut_unchecked() = Some(guard_ref);
+        } else {
+            *self.head_mut() = Some(guard_ref);
+        }
+        guard
+    }
 
-            if let Some(mut prev_node) = prev_node {
-                *prev_node.get_next_mut_unchecked() = None;
-            } else {
-                *self.head_mut() = None;
-            }
+    /// Deregisters the node referred to by `node_ptr`
+    ///
+    /// # Safety:
+    ///  - The caller asserts that it has a mutable lock to the `IntrusiveList`.
+    ///  - The caller asserts that the node pointed to by `node_ptr` is still alive.
+    ///  - The caller asserts that the nodes pointed to by `node.prev` & `node.next` are still alive.
+    #[inline]
+    pub unsafe fn deregister(&self, node_ptr: NodeRef<T>) {
+        if let Some(next) = node_ptr.get_next_unchecked() {
+            *next.get_prev_mut_unchecked() = node_ptr.get_prev_unchecked();
+        } else {
+            *self.tail_mut() = None;
+        }
+
+        if let Some(prev) = node_ptr.get_prev_unchecked() {
+            *prev.get_next_mut_unchecked() = node_ptr.get_next_unchecked();
+        } else {
+            *self.head_mut() = None;
         }
     }
 
     #[inline]
     /// Iterates over the list while `f` returns `true`.
-    pub unsafe fn for_each_while<F>(self: Pin<&Self>, mut f: F)
+    pub unsafe fn for_each_while<F>(&self, mut f: F)
     where
         F: FnMut(&mut T) -> bool,
     {
@@ -159,7 +166,7 @@ impl<T> RawIntrusiveList<T> {
     }
 
     #[inline]
-    pub unsafe fn for_each<F>(self: Pin<&Self>, mut f: F)
+    pub unsafe fn for_each<F>(&self, mut f: F)
     where
         F: FnMut(&mut T),
     {
@@ -179,7 +186,7 @@ impl<T> RawIntrusiveList<T> {
 
     #[inline]
     /// Iterates over the list while `f` returns `true` adding values to the accumulator
-    pub unsafe fn fold_while<A, F>(self: Pin<&Self>, mut init: A, mut f: F) -> A
+    pub unsafe fn fold_while<A, F>(&self, mut init: A, mut f: F) -> A
     where
         F: FnMut(&mut A, &mut T) -> bool,
     {
@@ -189,7 +196,7 @@ impl<T> RawIntrusiveList<T> {
 
     #[inline]
     /// Iterates over the list while `f` returns `true`.
-    pub unsafe fn fold<A, F>(self: Pin<&Self>, init: A, mut f: F) -> A
+    pub unsafe fn fold<A, F>(&self, init: A, mut f: F) -> A
     where
         F: FnMut(A, &mut T) -> A,
     {

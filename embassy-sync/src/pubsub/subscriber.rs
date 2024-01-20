@@ -6,36 +6,42 @@ use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use super::{PubSubBehavior, PubSubChannel, WaitResult};
+use pin_project::{pin_project, pinned_drop};
+
+use super::{PubSubChannel, WaitResult};
 use crate::blocking_mutex::raw::RawMutex;
+use crate::waitqueue::{MultiWakerRegistration, MultiWakerStorage};
 
 /// A subscriber to a channel
-pub struct Sub<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> {
+#[pin_project(PinnedDrop)]
+pub struct Sub<'a, M: RawMutex, T: Clone, const CAP: usize> {
     /// The message id of the next message we are yet to receive
     next_message_id: u64,
     /// The channel we are a subscriber to
-    channel: &'a PSB,
-    _phantom: PhantomData<T>,
+    channel: &'a PubSubChannel<M, T, CAP>,
+    #[pin]
+    waker: MultiWakerStorage,
 }
 
-impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Sub<'a, PSB, T> {
-    pub(super) fn new(next_message_id: u64, channel: &'a PSB) -> Self {
+impl<'a, M: RawMutex, T: Clone, const CAP: usize> Sub<'a, M, T, CAP> {
+    pub(super) fn new(next_message_id: u64, channel: &'a PubSubChannel<M, T, CAP>) -> Self {
         Self {
             next_message_id,
             channel,
-            _phantom: Default::default(),
+            waker: MultiWakerStorage::new(),
         }
     }
 
     /// Wait for a published message
-    pub fn next_message<'s>(&'s mut self) -> SubscriberWaitFuture<'s, 'a, PSB, T> {
-        SubscriberWaitFuture { subscriber: self }
+    pub fn next_message<'s>(&'s mut self) -> SubscriberWaitFuture<'s, 'a, M, T, CAP> {
+        SubscriberWaitFuture::new(self)
     }
 
     /// Wait for a published message (ignoring lag results)
     pub async fn next_message_pure(&mut self) -> T {
+        let mut s = core::pin::Pin::new(self);
         loop {
-            match self.next_message().await {
+            match s.as_mut().next_message().await {
                 WaitResult::Lagged(_) => continue,
                 WaitResult::Message(message) => break message,
             }
@@ -46,10 +52,19 @@ impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Sub<'a, PSB, T> {
     ///
     /// This function does not peek. The message is received if there is one.
     pub fn try_next_message(&mut self) -> Option<WaitResult<T>> {
-        match self.channel.get_message_with_context(&mut self.next_message_id, None) {
-            Poll::Ready(result) => Some(result),
-            Poll::Pending => None,
+        let res = self.channel.get_message(self.next_message_id);
+
+        match &res {
+            Some(WaitResult::Lagged(lagged)) => {
+                self.next_message_id += *lagged;
+            }
+            Some(WaitResult::Message(_)) => {
+                self.next_message_id += 1;
+            }
+            None => (),
         }
+
+        res
     }
 
     /// Try to see if there's a published message we haven't received yet (ignoring lag results).
@@ -71,82 +86,100 @@ impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Sub<'a, PSB, T> {
     }
 }
 
-impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Drop for Sub<'a, PSB, T> {
-    fn drop(&mut self) {
-        self.channel.unregister_subscriber(self.next_message_id)
+#[pinned_drop]
+impl<'a, M: RawMutex, T: Clone, const CAP: usize> PinnedDrop for Sub<'a, M, T, CAP> {
+    fn drop(self: Pin<&mut Self>) {
+        self.channel.unregister_subscriber(self.next_message_id);
     }
 }
 
-impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Unpin for Sub<'a, PSB, T> {}
+// #[pin_project]
+// pub struct SubStream<'s, 'a, M: RawMutex, T: Clone, const CAP: usize> {
+//     inner: InnerSubscriberWaitFuture<'s, 'a, M, T, CAP>,
+// }
 
-/// Warning: The stream implementation ignores lag results and returns all messages.
-/// This might miss some messages without you knowing it.
-impl<'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> futures_util::Stream for Sub<'a, PSB, T> {
-    type Item = T;
+// // /// Warning: The stream implementation ignores lag results and returns all messages.
+// // /// This might miss some messages without you knowing it.
+// impl<'a, M: RawMutex, T: Clone, const CAP: usize> futures_util::Stream for Sub<'a, M, T, CAP> {
+//     type Item = T;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self
-            .channel
-            .get_message_with_context(&mut self.next_message_id, Some(cx))
-        {
-            Poll::Ready(WaitResult::Message(message)) => Poll::Ready(Some(message)),
-            Poll::Ready(WaitResult::Lagged(_)) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Poll::Pending => Poll::Pending,
-        }
+//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//         match self
+//             .channel
+//             .get_message_with_context(&mut self.next_message_id, Some(cx))
+//         {
+//             Poll::Ready(WaitResult::Message(message)) => Poll::Ready(Some(message)),
+//             Poll::Ready(WaitResult::Lagged(_)) => {
+//                 cx.waker().wake_by_ref();
+//                 Poll::Pending
+//             }
+//             Poll::Pending => Poll::Pending,
+//         }
+//     }
+// }
+
+/// Future for the Subscriber wait action
+#[repr(transparent)]
+pub struct SubscriberWaitFuture<'s, 'a, M: RawMutex, T: Clone, const CAP: usize>(
+    InnerSubscriberWaitFuture<'s, 'a, M, T, CAP>,
+);
+
+impl<'s, 'a, M: RawMutex, T: Clone, const CAP: usize> SubscriberWaitFuture<'s, 'a, M, T, CAP> {
+    /// Creates a new `SubscriberWaitFuture`
+    pub fn new(subscriber: &'s mut Sub<'a, M, T, CAP>) -> Self {
+        Self(InnerSubscriberWaitFuture::Init {
+            subscriber: core::pin::Pin::new(subscriber),
+        })
     }
 }
 
-/// A subscriber that holds a dynamic reference to the channel
-pub struct DynSubscriber<'a, T: Clone>(pub(super) Sub<'a, dyn PubSubBehavior<T> + 'a, T>);
-
-impl<'a, T: Clone> Deref for DynSubscriber<'a, T> {
-    type Target = Sub<'a, dyn PubSubBehavior<T> + 'a, T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a, T: Clone> DerefMut for DynSubscriber<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// A subscriber that holds a generic reference to the channel
-pub struct Subscriber<'a, M: RawMutex, T: Clone, const CAP: usize>(pub(super) Sub<'a, PubSubChannel<M, T, CAP>, T>);
-
-impl<'a, M: RawMutex, T: Clone, const CAP: usize> Deref for Subscriber<'a, M, T, CAP> {
-    type Target = Sub<'a, PubSubChannel<M, T, CAP>, T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a, M: RawMutex, T: Clone, const CAP: usize> DerefMut for Subscriber<'a, M, T, CAP> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// Future for the subscriber wait action
+#[derive(Default)]
+#[pin_project]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct SubscriberWaitFuture<'s, 'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> {
-    subscriber: &'s mut Sub<'a, PSB, T>,
+enum InnerSubscriberWaitFuture<'s, 'a, M: RawMutex, T: Clone, const CAP: usize> {
+    /// The message we need to publish
+    Init {
+        subscriber: Pin<&'s mut Sub<'a, M, T, CAP>>,
+    },
+    Registered {
+        ch: &'a PubSubChannel<M, T, CAP>,
+        msg_id: &'s mut u64,
+        reg: MultiWakerRegistration<'s, M>,
+    },
+    #[default]
+    Complete,
 }
 
-impl<'s, 'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Future for SubscriberWaitFuture<'s, 'a, PSB, T> {
+impl<'s, 'a, M: RawMutex, T: Clone, const CAP: usize> Future for SubscriberWaitFuture<'s, 'a, M, T, CAP> {
     type Output = WaitResult<T>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.subscriber
-            .channel
-            .get_message_with_context(&mut self.subscriber.next_message_id, Some(cx))
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let s = self.get_mut();
+        match core::mem::take(&mut s.0) {
+            InnerSubscriberWaitFuture::Init { subscriber } => {
+                let p = subscriber.project();
+                let ch = *p.channel;
+                let store = p.waker;
+                let msg_id = p.next_message_id;
+
+                if let Some(r) = ch.get_message(*msg_id) {
+                    *msg_id += r.msg_id_incr();
+                    return Poll::Ready(r);
+                }
+
+                let reg = ch.subscriber_wakers.register(store, cx.waker());
+                s.0 = InnerSubscriberWaitFuture::Registered { msg_id, ch, reg };
+            }
+            InnerSubscriberWaitFuture::Registered { msg_id, ch, mut reg } => {
+                if let Some(r) = ch.get_message(*msg_id) {
+                    *msg_id += r.msg_id_incr();
+                    return Poll::Ready(r);
+                }
+                ch.subscriber_wakers.update(&mut reg, cx.waker());
+                s.0 = InnerSubscriberWaitFuture::Registered { msg_id, ch, reg };
+            }
+            InnerSubscriberWaitFuture::Complete => unreachable!(),
+        }
+        Poll::Pending
     }
 }
-
-impl<'s, 'a, PSB: PubSubBehavior<T> + ?Sized, T: Clone> Unpin for SubscriberWaitFuture<'s, 'a, PSB, T> {}
