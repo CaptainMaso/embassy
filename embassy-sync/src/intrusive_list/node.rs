@@ -1,98 +1,193 @@
+use core::borrow::Borrow;
 use core::pin::Pin;
 
 use pin_project::pin_project;
 
 use super::*;
-use crate::{blocking_mutex::raw::RawMutex, debug_cell::DebugCell};
+use crate::blocking_mutex::raw::RawMutex;
+use crate::debug_cell::DebugCell;
 
 #[pin_project]
-pub struct Node<T> {
+pub(super) struct Node<T: ?Sized> {
+    links: DebugCell<NodeLinks<T>>,
     data: DebugCell<T>,
-    prev: DebugCell<Option<NodeRef<T>>>,
-    next: DebugCell<Option<NodeRef<T>>>,
 }
 
-impl<T> Node<T> {
-    pub fn new(data: T) -> Self {
+impl<T: ?Sized> Node<T> {
+    pub const fn new(data: T) -> Self
+    where
+        T: Sized,
+    {
         Self {
             data: DebugCell::new(data),
-            prev: DebugCell::new(None),
-            next: DebugCell::new(None),
+            links: DebugCell::new(NodeLinks::Unlinked),
         }
     }
 
     /// Gets a shared reference to the node data
     ///
     /// SAFETY: Assumes that the caller has a valid shared reference to the `RawIntrusiveList`
-    unsafe fn get_data(&self) -> impl core::ops::Deref<Target = T> + '_ {
+    pub unsafe fn get_data(&self) -> crate::debug_cell::Ref<'_, T> {
         self.data.borrow()
     }
 
     /// Gets a mutable reference to the node data
     ///
     /// SAFETY: Assumes that the caller has a valid unique reference to the `RawIntrusiveList`
-    unsafe fn get_data_mut(&self) -> impl core::ops::DerefMut<Target = T> + '_ {
+    pub unsafe fn get_data_mut(&self) -> crate::debug_cell::RefMut<'_, T> {
         self.data.borrow_mut()
     }
 
-    /// Gets a shared reference to the next node reference
+    /// Gets a shared reference to the node data
     ///
-    /// SAFETY: Assumes that the caller has a valid shared reference to
-    /// the `RawIntrusiveList`.
-    unsafe fn get_next(&self) -> impl core::ops::Deref<Target = Option<NodeRef<T>>> + '_ {
-        self.next.borrow()
+    /// SAFETY: Assumes that the caller has a valid shared reference to the `RawIntrusiveList`
+    unsafe fn get_links(&self) -> crate::debug_cell::Ref<'_, NodeLinks<T>> {
+        self.links.borrow()
     }
 
-    /// Gets a mutable the value of the next node
+    /// Gets a mutable reference to the node data
     ///
     /// SAFETY: Assumes that the caller has a valid unique reference to the `RawIntrusiveList`
-    unsafe fn get_next_mut(&self) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + '_ {
-        self.next.borrow_mut()
+    unsafe fn get_links_mut(&self) -> crate::debug_cell::RefMut<'_, NodeLinks<T>> {
+        self.links.borrow_mut()
+    }
+}
+
+#[derive(Debug, Default)]
+pub enum NodeLinks<T: ?Sized> {
+    #[default]
+    Unlinked,
+    Single,
+    Head {
+        next: NodeRef<T>,
+    },
+    Tail {
+        prev: NodeRef<T>,
+    },
+    Full {
+        prev: NodeRef<T>,
+        next: NodeRef<T>,
+    },
+}
+impl<T: ?Sized> NodeLinks<T> {
+    #[inline]
+    pub fn is_linked(&self) -> bool {
+        match self {
+            Self::Unlinked => false,
+            _ => true,
+        }
     }
 
-    /// Gets a shared reference to the previous node reference
-    ///
-    /// SAFETY: Assumes that the caller has a valid shared reference to
-    /// the `RawIntrusiveList`.
-    unsafe fn get_prev(&self) -> impl core::ops::Deref<Target = Option<NodeRef<T>>> + '_ {
-        self.prev.borrow()
+    #[inline]
+    pub fn next(&self) -> Option<NodeRef<T>> {
+        match self {
+            NodeLinks::Head { next } | NodeLinks::Full { next, .. } => Some(*next),
+            _ => None,
+        }
     }
 
-    /// Gets a mutable the value of the previous node
-    ///
-    /// SAFETY: Assumes that the caller has a valid unique reference to the `RawIntrusiveList`
-    unsafe fn get_prev_mut(&self) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + '_ {
-        self.prev.borrow_mut()
+    #[inline]
+    pub fn set_prev(&mut self, node: NodeRef<T>) {
+        match self {
+            NodeLinks::Unlinked => panic!("Tried to set prev of an unlinked node"),
+            NodeLinks::Single => *self = NodeLinks::Tail { prev: node },
+            NodeLinks::Head { next } => {
+                *self = NodeLinks::Full {
+                    prev: node,
+                    next: *next,
+                }
+            }
+            NodeLinks::Tail { prev } | NodeLinks::Full { prev, .. } => {
+                *prev = node;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn set_next(&mut self, node: NodeRef<T>) {
+        match self {
+            NodeLinks::Unlinked => panic!("Tried to set next of an unlinked node"),
+            NodeLinks::Single => *self = NodeLinks::Head { next: node },
+            NodeLinks::Tail { prev } => {
+                *self = NodeLinks::Full {
+                    prev: *prev,
+                    next: node,
+                }
+            }
+            NodeLinks::Head { next } | NodeLinks::Full { next, .. } => {
+                *next = node;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn clear_prev(&mut self) {
+        match self {
+            NodeLinks::Unlinked => panic!("Tried to clear prev of an unlinked node"),
+            NodeLinks::Single => panic!("Tried to clear prev of a single node"),
+            NodeLinks::Head { next } => panic!("Tried to clear prev of the head node"),
+            NodeLinks::Tail { prev } => *self = NodeLinks::Single,
+            NodeLinks::Full { prev, next } => *self = NodeLinks::Head { next: *next },
+        }
+    }
+
+    #[inline]
+    pub fn clear_next(&mut self) {
+        match self {
+            NodeLinks::Unlinked => panic!("Tried to clear next of an unlinked node"),
+            NodeLinks::Single => panic!("Tried to clear next of a single node"),
+            NodeLinks::Tail { prev } => panic!("Tried to clear prev of the tail node"),
+            NodeLinks::Head { next } => *self = NodeLinks::Single,
+            NodeLinks::Full { prev, next } => *self = NodeLinks::Tail { prev: *prev },
+        }
+    }
+
+    #[inline]
+    pub fn prev(&self) -> Option<NodeRef<T>> {
+        match self {
+            NodeLinks::Tail { prev } | NodeLinks::Full { prev, .. } => Some(*prev),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn split(self) -> (Option<NodeRef<T>>, Option<NodeRef<T>>) {
+        match self {
+            NodeLinks::Full { prev, next } => (Some(prev), Some(next)),
+            NodeLinks::Head { next } => (None, Some(next)),
+            NodeLinks::Tail { prev } => (Some(prev), None),
+            _ => (None, None),
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) -> Self {
+        core::mem::take(self)
     }
 }
 
 #[derive(Debug)]
-pub struct NodeRef<T> {
-    #[cfg(debug_assertions)]
-    list_ptr: *const (),
-    ptr: *const Node<T>,
+pub(super) struct NodeRef<T: ?Sized> {
+    pub(super) ptr: *const Node<T>,
 }
 
-impl<T> Clone for NodeRef<T> {
+impl<T: ?Sized> Clone for NodeRef<T> {
     fn clone(&self) -> Self {
-        Self {
-            list_ptr: self.list_ptr,
-            ptr: self.ptr,
-        }
+        *self
     }
 }
 
-impl<T> Copy for NodeRef<T> {}
+impl<T: ?Sized> Copy for NodeRef<T> {}
 
-impl<T> PartialEq for NodeRef<T> {
+impl<T: ?Sized> PartialEq for NodeRef<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.list_ptr == other.list_ptr && self.ptr == other.ptr
+        core::ptr::addr_eq(self.ptr, other.ptr)
     }
 }
 
 impl<T> Eq for NodeRef<T> {}
 
-impl<T> NodeRef<T> {
+impl<T: ?Sized> NodeRef<T> {
     /// Gets a reference to the `Node<T>`
     ///
     /// # Safety
@@ -104,196 +199,147 @@ impl<T> NodeRef<T> {
         self.ptr.as_ref().unwrap()
     }
 
-    /// Gets a reference to the `Node<T>`
+    /// Gets a shared reference to the node data
     ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
+    /// SAFETY: Assumes that the caller has a valid shared reference to the `RawIntrusiveList`
     #[inline(always)]
-    pub fn get_node<'l>(&'l self, lock: &'l ListLock<'_>) -> &'l Node<T> {
-        lock.valididate_ptr(self.list_ptr);
-        unsafe { self.get_node_unchecked() }
+    pub unsafe fn get_data(&self) -> crate::debug_cell::Ref<'_, T> {
+        self.get_node_unchecked().get_data()
     }
 
-    /// Gets a reference to the data stored in the node `T`
+    /// Gets a mutable reference to the node data
     ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other mutable references to the `RawIntrusiveList`
+    /// SAFETY: Assumes that the caller has a valid unique reference to the `RawIntrusiveList`
     #[inline(always)]
-    pub unsafe fn get_data_unchecked<'l>(&'l self) -> impl core::ops::Deref<Target = T> + 'l {
-        let n = self.get_node_unchecked();
-        n.get_data()
+    pub unsafe fn get_data_mut(&self) -> crate::debug_cell::RefMut<'_, T> {
+        self.get_node_unchecked().get_data_mut()
     }
 
-    /// Gets a reference to the data stored in the node `T`
+    /// Gets a shared reference to the node data
     ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
+    /// SAFETY: Assumes that the caller has a valid shared reference to the `RawIntrusiveList`
     #[inline(always)]
-    pub fn get_data<'l>(&'l self, lock: &'l ListLock<'_>) -> impl core::ops::Deref<Target = T> + 'l {
-        lock.valididate_ptr(self.list_ptr);
-        // SAFETY: If the lock is valid, there should never be any
-        // overlapping mutable references.
-        unsafe { self.get_data_unchecked() }
+    pub unsafe fn get_links(&self) -> crate::debug_cell::Ref<'_, NodeLinks<T>> {
+        self.get_node_unchecked().get_links()
     }
 
-    /// Gets a mutable reference to the data stored in the node `T`
+    /// Gets a mutable reference to the node data
     ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other references to the `RawIntrusiveList`
+    /// SAFETY: Assumes that the caller has a valid unique reference to the `RawIntrusiveList`
     #[inline(always)]
-    pub unsafe fn get_data_mut_unchecked<'l>(&'l self) -> impl core::ops::DerefMut<Target = T> + '_ {
-        let n = self.get_node_unchecked();
-        n.get_data_mut()
+    pub unsafe fn get_links_mut(&self) -> crate::debug_cell::RefMut<'_, NodeLinks<T>> {
+        self.get_node_unchecked().get_links_mut()
     }
 
-    /// Gets a reference to the data stored in the node `T`
-    ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_data_mut<'l>(&'l self, lock: &'l mut ListLock<'_>) -> impl core::ops::DerefMut<Target = T> + '_ {
-        lock.valididate_ptr(self.list_ptr);
-
-        // SAFETY: If the lock is valid, there should never be any
-        // overlapping references.
-        unsafe { self.get_data_mut_unchecked() }
+    pub unsafe fn next(&self) -> Option<NodeRef<T>> {
+        self.get_links().next()
     }
 
-    /// Gets a `NodeRef<T>` of the next node in the list.
-    ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other mutable references to the `RawIntrusiveList`
     #[inline(always)]
-    pub unsafe fn get_next_unchecked(&self) -> Option<NodeRef<T>> {
-        let n = self.get_node_unchecked();
-        *n.get_next()
+    pub unsafe fn prev(&self) -> Option<NodeRef<T>> {
+        self.get_links().next()
     }
 
-    /// Gets a `NodeRef<T>` of the next node in the list.
-    ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_next(&self, lock: &ListLock<'_>) -> Option<NodeRef<T>> {
-        lock.valididate_ptr(self.list_ptr);
-
-        // SAFETY: If the lock is valid, there should never be any
-        // overlapping references.
-        unsafe { self.get_next_unchecked() }
+    pub unsafe fn set_next(&self, node: NodeRef<T>) {
+        self.get_links_mut().set_next(node)
     }
 
-    /// Gets a `NodeRef<T>` to the next node in the list.
-    ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other mutable references to the `RawIntrusiveList`
     #[inline(always)]
-    pub unsafe fn get_next_mut_unchecked<'l>(&'l self) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
-        let n = self.get_node_unchecked();
-        n.get_next_mut()
+    pub unsafe fn set_prev(&self, node: NodeRef<T>) {
+        self.get_links_mut().set_next(node)
     }
 
-    /// Gets a `NodeRef<T>` to the next node in the list.
-    ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
     #[inline(always)]
-    pub fn get_next_mut<'l>(
-        &'l self,
-        lock: &'l mut ListLock<'_>,
-    ) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
-        lock.valididate_ptr(self.list_ptr);
-        let n = self.get_node(lock);
-        unsafe { n.get_next_mut() }
+    pub unsafe fn clear_next(&self) {
+        self.get_links_mut().clear_next()
     }
 
-    /// Gets a `NodeRef<T>` of the previous node in the list.
-    ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other mutable references to the `RawIntrusiveList`
     #[inline(always)]
-    pub unsafe fn get_prev_unchecked(&self) -> Option<NodeRef<T>> {
-        let n = self.get_node_unchecked();
-        *n.get_prev()
+    pub unsafe fn clear_prev(&self) {
+        self.get_links_mut().clear_prev()
     }
 
-    /// Gets a `NodeRef<T>` of the previous node in the list.
+    /// Inserts before this node
     ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
-    #[inline(always)]
-    pub fn get_prev(&self, lock: &ListLock<'_>) -> Option<NodeRef<T>> {
-        lock.valididate_ptr(self.list_ptr);
-
-        // SAFETY: If the lock is valid, there should never be any
-        // overlapping references.
-        unsafe { self.get_prev_unchecked() }
-    }
-
-    /// Gets a `NodeRef<T>` to the previous node in the list.
+    /// # Panic
     ///
-    /// SAFETY: The caller must ensure that there are no
-    /// other mutable references to the `RawIntrusiveList`
-    #[inline(always)]
-    pub unsafe fn get_prev_mut_unchecked<'l>(&'l self) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
-        let n = self.get_node_unchecked();
-        n.get_prev_mut()
-    }
-
-    /// Gets a `NodeRef<T>` to the previous node in the list.
-    ///
-    /// The supplied `ListLock` must be created from the
-    /// registered `(Raw)IntrusiveList`, otherwise it will
-    /// panic (only in debug mode).
-    #[inline(always)]
-    pub fn get_prev_mut<'l>(
-        &'l self,
-        lock: &'l mut ListLock<'_>,
-    ) -> impl core::ops::DerefMut<Target = Option<NodeRef<T>>> + 'l {
-        lock.valididate_ptr(self.list_ptr);
-        let n = self.get_node(lock);
-        unsafe { n.get_prev_mut() }
-    }
-}
-
-pub struct NodeGuard<'a, T, M: RawMutex> {
-    pub(super) lock: &'a M,
-    pub(super) list: &'a RawIntrusiveList<T>,
-    pub(super) node: Pin<&'a Node<T>>,
-}
-
-impl<'a, T, M: RawMutex> NodeGuard<'a, T, M> {
-    /// Returns a `NodeRef<T>` pointing at this node
-    pub fn get_ref(&self) -> NodeRef<T> {
-        #[cfg(debug_assertions)]
-        let list_ptr = self.list as *const RawIntrusiveList<T>;
-        let ptr = self.node.as_ref().get_ref() as *const _;
-
-        NodeRef {
-            #[cfg(debug_assertions)]
-            list_ptr: list_ptr.cast(),
-            ptr,
+    /// This function panics if this node is unlinked.
+    #[inline]
+    pub unsafe fn insert_before(&self, node: NodeRef<T>) {
+        node.set_next(*self);
+        let mut links = self.get_links_mut();
+        let links = &mut *links;
+        match links {
+            NodeLinks::Unlinked => panic!("Tried to insert before an unlinked node"),
+            NodeLinks::Single => *links = NodeLinks::Head { next: node },
+            NodeLinks::Head { next } => {
+                *links = NodeLinks::Full {
+                    prev: node,
+                    next: *next,
+                }
+            }
+            NodeLinks::Tail { prev } | NodeLinks::Full { prev, .. } => {
+                let old_next = core::mem::replace(prev, node);
+                old_next.set_prev(node);
+                node.set_prev(old_next);
+            }
         }
     }
 
-    pub fn map<O>(&self, f: impl FnOnce(&mut T) -> O) -> O {
-        self.lock.lock(|| {
-            let mut d = unsafe { self.node.get_data_mut() };
-            f(&mut d)
-        })
+    /// Inserts after this node
+    ///
+    /// # Safety
+    ///
+    /// Requires that the node have an
+    ///
+    /// # Panic
+    ///
+    /// This function panics if this node is unlinked.
+    #[inline]
+    pub unsafe fn insert_after(&self, node: NodeRef<T>) {
+        node.set_prev(*self);
+        let mut links = self.get_links_mut();
+        let links = &mut *links;
+        match links {
+            NodeLinks::Unlinked => panic!("Tried to insert after an unlinked node"),
+            NodeLinks::Single => *links = NodeLinks::Head { next: node },
+            NodeLinks::Tail { prev } => {
+                *links = NodeLinks::Full {
+                    prev: *prev,
+                    next: node,
+                }
+            }
+            NodeLinks::Head { next } | NodeLinks::Full { next, .. } => {
+                let old_next = core::mem::replace(next, node);
+                old_next.set_prev(node);
+                node.set_next(old_next);
+            }
+        }
     }
-}
 
-impl<'a, T, M: RawMutex> Drop for NodeGuard<'a, T, M> {
-    fn drop(&mut self) {
-        let n = self.get_ref();
-        self.lock.lock(|| unsafe {
-            self.list.deregister(n);
-        });
+    pub unsafe fn update_links(&self, links: NodeLinks<T>) -> NodeLinks<T> {
+        core::mem::replace(&mut *self.get_links_mut(), links)
+    }
+
+    /// Clears the current nodes links and stitches the list
+    /// together.
+    #[inline]
+    pub unsafe fn remove(&self) -> NodeLinks<T> {
+        let l = self.get_links_mut().clear();
+
+        match &l {
+            NodeLinks::Unlinked => (),
+            NodeLinks::Single => (),
+            NodeLinks::Head { next } => next.clear_prev(),
+            NodeLinks::Tail { prev } => prev.clear_next(),
+            NodeLinks::Full { prev, next } => {
+                next.set_prev(*prev);
+                prev.set_next(*next);
+            }
+        }
+
+        l
     }
 }

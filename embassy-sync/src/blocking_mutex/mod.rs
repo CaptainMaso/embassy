@@ -5,7 +5,8 @@ pub mod raw;
 
 use core::cell::UnsafeCell;
 
-use self::raw::RawMutex;
+use self::raw::{ConstRawMutex, RawMutex};
+use crate::debug_cell::DebugCell;
 
 /// Blocking mutex (not async)
 ///
@@ -26,42 +27,45 @@ pub struct Mutex<R, T: ?Sized> {
     // NOTE: `raw` must be FIRST, so when using ThreadModeMutex the "can't drop in non-thread-mode" gets
     // to run BEFORE dropping `data`.
     raw: R,
-    data: UnsafeCell<T>,
+    data: DebugCell<T>,
 }
 
 unsafe impl<R: RawMutex + Send, T: ?Sized + Send> Send for Mutex<R, T> {}
 unsafe impl<R: RawMutex + Sync, T: ?Sized + Send> Sync for Mutex<R, T> {}
 
-impl<R: RawMutex, T> Mutex<R, T> {
+impl<R, T> Mutex<R, T> {
     /// Creates a new mutex in an unlocked state ready for use.
     #[inline]
-    pub const fn new(val: T) -> Mutex<R, T> {
+    pub const fn new(val: T) -> Mutex<R, T>
+    where
+        R: ConstRawMutex,
+    {
         Mutex {
             raw: R::INIT,
-            data: UnsafeCell::new(val),
+            data: DebugCell::new(val),
         }
     }
 
-    /// Creates a critical section and grants temporary access to the protected data.
-    pub fn lock<U>(&self, f: impl FnOnce(&T) -> U) -> U {
-        self.raw.lock(|| {
-            let ptr = self.data.get() as *const T;
-            let inner = unsafe { &*ptr };
-            f(inner)
-        })
-    }
-}
-
-impl<R, T> Mutex<R, T> {
     /// Creates a new mutex based on a pre-existing raw mutex.
     ///
     /// This allows creating a mutex in a constant context on stable Rust.
     #[inline]
-    pub const fn const_new(raw_mutex: R, val: T) -> Mutex<R, T> {
+    pub const fn new_with(val: T, raw_mutex: R) -> Mutex<R, T> {
         Mutex {
             raw: raw_mutex,
-            data: UnsafeCell::new(val),
+            data: DebugCell::new(val),
         }
+    }
+
+    /// Creates a critical section and grants temporary access to the protected data.
+    pub fn lock<U>(&self, f: impl FnOnce(&T) -> U) -> U
+    where
+        R: RawMutex,
+    {
+        self.raw.lock(|| {
+            let r = unsafe { self.data.borrow() };
+            f(&*r)
+        })
     }
 
     /// Consumes this mutex, returning the underlying data.
@@ -76,7 +80,7 @@ impl<R, T> Mutex<R, T> {
     /// take place---the mutable borrow statically guarantees no locks exist.
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.data.get() }
+        self.data.get_mut()
     }
 }
 
@@ -97,16 +101,14 @@ pub type NoopMutex<T> = Mutex<raw::NoopRawMutex, T>;
 impl<T> Mutex<raw::CriticalSectionRawMutex, T> {
     /// Borrows the data for the duration of the critical section
     pub fn borrow<'cs>(&'cs self, _cs: critical_section::CriticalSection<'cs>) -> &'cs T {
-        let ptr = self.data.get() as *const T;
-        unsafe { &*ptr }
+        unsafe { self.data.as_ptr().as_ref().unwrap() }
     }
 }
 
 impl<T> Mutex<raw::NoopRawMutex, T> {
     /// Borrows the data
     pub fn borrow(&self) -> &T {
-        let ptr = self.data.get() as *const T;
-        unsafe { &*ptr }
+        unsafe { self.data.as_ptr().as_ref().unwrap() }
     }
 }
 

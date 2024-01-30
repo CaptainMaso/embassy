@@ -3,7 +3,7 @@ use core::cell::Cell;
 use core::future::{poll_fn, Future};
 use core::task::{Context, Poll, Waker};
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex;
 
 /// Single-slot signaling primitive.
@@ -44,12 +44,12 @@ enum State<T> {
     Signaled(T),
 }
 
-impl<M, T> Signal<M, T>
-where
-    M: RawMutex,
-{
+impl<M: RawMutex, T> Signal<M, T> {
     /// Create a new `Signal`.
-    pub const fn new() -> Self {
+    pub const fn new() -> Self
+    where
+        M: ConstRawMutex,
+    {
         Self {
             state: Mutex::new(Cell::new(State::None)),
         }
@@ -58,7 +58,7 @@ where
 
 impl<M, T> Default for Signal<M, T>
 where
-    M: RawMutex,
+    M: ConstRawMutex,
 {
     fn default() -> Self {
         Self::new()

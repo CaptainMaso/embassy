@@ -7,7 +7,7 @@ use core::ops::Range;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex;
 use crate::ring_buffer::RingBuffer;
 use crate::waitqueue::WakerRegistration;
@@ -251,7 +251,10 @@ where
     /// // Declare a bounded pipe, with a buffer of 256 bytes.
     /// let mut pipe = Pipe::<NoopRawMutex, 256>::new();
     /// ```
-    pub const fn new() -> Self {
+    pub const fn new() -> Self
+    where
+        M: ConstRawMutex,
+    {
         Self {
             buf: Buffer(UnsafeCell::new([0; N])),
             inner: Mutex::new(RefCell::new(PipeState {

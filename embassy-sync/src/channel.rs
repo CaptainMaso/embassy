@@ -25,7 +25,7 @@ use core::task::{Context, Poll};
 
 use heapless::Deque;
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex;
 use crate::waitqueue::WakerRegistration;
 
@@ -464,9 +464,27 @@ where
     /// // Declare a bounded channel of 3 u32s.
     /// let mut channel = Channel::<NoopRawMutex, u32, 3>::new();
     /// ```
-    pub const fn new() -> Self {
+    pub const fn new() -> Self
+    where
+        M: ConstRawMutex,
+    {
         Self {
             inner: Mutex::new(RefCell::new(ChannelState::new())),
+        }
+    }
+
+    /// Establish a new bounded channel. For example, to create one with a NoopMutex:
+    ///
+    /// ```
+    /// use embassy_sync::channel::Channel;
+    /// use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    ///
+    /// // Declare a bounded channel of 3 u32s.
+    /// let mut channel = Channel::<NoopRawMutex, u32, 3>::new();
+    /// ```
+    pub const fn new_with(m: M) -> Self {
+        Self {
+            inner: Mutex::new_with(RefCell::new(ChannelState::new()), m),
         }
     }
 

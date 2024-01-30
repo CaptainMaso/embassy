@@ -22,7 +22,7 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::{Context, Poll};
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex;
 use crate::waitqueue::WakerRegistration;
 
@@ -48,7 +48,10 @@ impl<'a, M: RawMutex, T> Channel<'a, M, T> {
     ///
     /// The provided buffer will be used and reused by the channel's logic, and thus dictates the
     /// channel's capacity.
-    pub fn new(buf: &'a mut [T]) -> Self {
+    pub fn new(buf: &'a mut [T]) -> Self
+    where
+        M: ConstRawMutex,
+    {
         let len = buf.len();
         assert!(len != 0);
 

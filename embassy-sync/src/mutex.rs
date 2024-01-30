@@ -4,11 +4,12 @@
 use core::cell::{RefCell, UnsafeCell};
 use core::future::poll_fn;
 use core::ops::{Deref, DerefMut};
+use core::pin::pin;
 use core::task::Poll;
 
 use crate::blocking_mutex::raw::RawMutex;
 use crate::blocking_mutex::Mutex as BlockingMutex;
-use crate::waitqueue::WakerRegistration;
+use crate::waitqueue::{MultiWakerRegistrar, MultiWakerRegistration, MultiWakerStorage};
 
 /// Error returned by [`Mutex::try_lock`]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -17,7 +18,6 @@ pub struct TryLockError;
 
 struct State {
     locked: bool,
-    waker: WakerRegistration,
 }
 
 /// Async mutex.
@@ -40,6 +40,7 @@ where
     M: RawMutex,
     T: ?Sized,
 {
+    wakers: MultiWakerRegistrar<M>,
     state: BlockingMutex<M, RefCell<State>>,
     inner: UnsafeCell<T>,
 }
@@ -56,10 +57,8 @@ where
     pub const fn new(value: T) -> Self {
         Self {
             inner: UnsafeCell::new(value),
-            state: BlockingMutex::new(RefCell::new(State {
-                locked: false,
-                waker: WakerRegistration::new(),
-            })),
+            state: BlockingMutex::new(RefCell::new(State { locked: false })),
+            wakers: MultiWakerRegistrar::new(),
         }
     }
 }
@@ -73,7 +72,12 @@ where
     ///
     /// This will wait for the mutex to be unlocked if it's already locked.
     pub async fn lock(&self) -> MutexGuard<'_, M, T> {
+        let mut store = MultiWakerStorage::new();
+        let store = pin!(store);
+        let mut reg = None;
         poll_fn(|cx| {
+            let reg = reg.get_or_insert_with(|| self.wakers.register(store, cx.waker()));
+            self.wakers.update(reg, waker);
             let ready = self.state.lock(|s| {
                 let mut s = s.borrow_mut();
                 if s.locked {

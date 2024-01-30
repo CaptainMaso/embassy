@@ -13,7 +13,7 @@ impl AtomicWaker {
     /// Create a new `AtomicWaker`.
     pub const fn new() -> Self {
         Self {
-            waker: Mutex::const_new(CriticalSectionRawMutex::new(), Cell::new(None)),
+            waker: Mutex::new(Cell::new(None)),
         }
     }
 

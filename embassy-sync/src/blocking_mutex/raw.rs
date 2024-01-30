@@ -23,13 +23,15 @@ use core::marker::PhantomData;
 ///
 /// Unsafe code is allowed to rely on this fact, so incorrect implementations will cause undefined behavior.
 pub unsafe trait RawMutex {
+    /// Lock this `RawMutex`.
+    fn lock<R>(&self, f: impl FnOnce() -> R) -> R;
+}
+
+pub trait ConstRawMutex: RawMutex {
     /// Create a new `RawMutex` instance.
     ///
     /// This is a const instead of a method to allow creating instances in const context.
     const INIT: Self;
-
-    /// Lock this `RawMutex`.
-    fn lock<R>(&self, f: impl FnOnce() -> R) -> R;
 }
 
 /// A mutex that allows borrowing data across executors and interrupts.
@@ -51,11 +53,13 @@ impl CriticalSectionRawMutex {
 }
 
 unsafe impl RawMutex for CriticalSectionRawMutex {
-    const INIT: Self = Self::new();
-
     fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
         critical_section::with(|_| f())
     }
+}
+
+impl ConstRawMutex for CriticalSectionRawMutex {
+    const INIT: Self = Self::new();
 }
 
 // ================
@@ -79,10 +83,13 @@ impl NoopRawMutex {
 }
 
 unsafe impl RawMutex for NoopRawMutex {
-    const INIT: Self = Self::new();
     fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
         f()
     }
+}
+
+impl ConstRawMutex for NoopRawMutex {
+    const INIT: Self = Self::new();
 }
 
 // ================
@@ -113,12 +120,15 @@ mod thread_mode {
     }
 
     unsafe impl RawMutex for ThreadModeRawMutex {
-        const INIT: Self = Self::new();
         fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
             assert!(in_thread_mode(), "ThreadModeMutex can only be locked from thread mode.");
 
             f()
         }
+    }
+
+    impl ConstRawMutex for ThreadModeRawMutex {
+        const INIT: Self = Self::new();
     }
 
     impl Drop for ThreadModeRawMutex {

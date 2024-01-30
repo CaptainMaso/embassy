@@ -11,7 +11,7 @@ use core::task::{Context, Poll};
 pub use heapless::binary_heap::{Kind, Max, Min};
 use heapless::BinaryHeap;
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex;
 use crate::channel::{DynamicChannel, DynamicReceiver, DynamicSender, TryReceiveError, TrySendError};
 use crate::waitqueue::WakerRegistration;
@@ -350,7 +350,10 @@ where
     /// // Declare a bounded channel of 3 u32s.
     /// let mut channel = PriorityChannel::<NoopRawMutex, u32, Max, 3>::new();
     /// ```
-    pub const fn new() -> Self {
+    pub const fn new() -> Self
+    where
+        M: ConstRawMutex,
+    {
         Self {
             inner: Mutex::new(RefCell::new(ChannelState::new())),
         }
