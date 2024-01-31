@@ -4,12 +4,12 @@ use core::task::Waker;
 
 use pin_project::pin_project;
 
-use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
+use crate::blocking_mutex::raw::{ConstRawMutex, CriticalSectionRawMutex, RawMutex};
 use crate::intrusive_list::{IntrusiveList, Item};
 
 /// Utility struct to register and wake multiple wakers.
 pub struct MultiWakerRegistrar<M: RawMutex> {
-    wakers: IntrusiveList<Waker, M>,
+    wakers: IntrusiveList<Option<Waker>, M>,
 }
 
 impl<M: RawMutex> MultiWakerRegistrar<M> {
@@ -23,48 +23,12 @@ impl<M: RawMutex> MultiWakerRegistrar<M> {
         }
     }
 
-    // /// Register a waker.
-    // pub fn register(&'s self) -> Self::M
-    // where
-    //     's: 'r,
-    //     'p: 'r,
-    // {
-    //     self.wakers.with_lock(move |lock| {
-    //         if !self.wakers.any(|w| waker.will_wake(w), lock) {
-    //             let _ = store.as_mut().node.insert(Node::new(waker.clone()));
-    //             let store_ref = store.into_ref();
-    //             let node_ref = store_ref.project_ref().node.as_pin_ref().unwrap();
-
-    //             let guard = self.wakers.push_tail(node_ref, lock);
-    //             MultiWakerRegistration {
-    //                 inner: InnerReg::Registered { guard },
-    //             }
-    //         } else {
-    //             MultiWakerRegistration {
-    //                 inner: InnerReg::Unregistered { storage: store },
-    //             }
-    //         }
-    //     })
-    // }
-
-    // pub fn update<'s, 'r>(&'s self, register: &mut MultiWakerRegistration<'r, M>, waker: &Waker)
-    // where
-    //     's: 'r,
-    // {
-    //     if !register.will_wake(waker) {
-    //         match core::mem::take(&mut register.inner) {
-    //             InnerReg::Empty => unreachable!(),
-    //             InnerReg::Unregistered { storage } => {
-    //                 let reg = self.register(storage, waker);
-    //                 *register = reg;
-    //             }
-    //             InnerReg::Registered { guard } => {
-    //                 guard.map(|w| w.clone_from(waker));
-    //                 register.inner = InnerReg::Registered { guard };
-    //             }
-    //         }
-    //     }
-    // }
+    /// Register a waker.
+    pub fn new_registration(&self) -> MultiWakerRegistration<'_, M> {
+        MultiWakerRegistration {
+            node: self.wakers.new_store(None),
+        }
+    }
 
     // /// Wake all registered wakers. This clears the buffer
     // pub fn wake(&self) {
@@ -74,7 +38,34 @@ impl<M: RawMutex> MultiWakerRegistrar<M> {
 }
 
 #[pin_project]
-pub struct MultiWakerStorage<'a, M: RawMutex> {
+pub struct MultiWakerRegistration<'a, M: RawMutex> {
     #[pin]
     node: Item<'a, Option<Waker>, M>,
 }
+
+impl<'a, M: RawMutex> MultiWakerRegistration<'a, M> {
+    pub fn update(self: Pin<&Self>, waker: &Waker) {
+        let n = self.project_ref().node;
+
+        n.with_cursor(|c| {
+            
+        });
+
+        if  {
+            n.lock(|s| {
+                let s = s.get_or_insert_with(|| waker.clone());
+                if !s.will_wake(waker) {
+                    *s = waker.clone();
+                }
+            });
+        }
+    }
+}
+
+const fn is_send<T: Send>() {}
+const fn is_sync<T: Sync>() {}
+
+const REGISTRAR_SEND: () = is_send::<MultiWakerRegistration<CriticalSectionRawMutex>>();
+const REGISTRAR_SYNC: () = is_sync::<MultiWakerRegistration<CriticalSectionRawMutex>>();
+const REGISTRATION_SEND: () = is_send::<MultiWakerRegistrar<CriticalSectionRawMutex>>();
+const REGISTRATION_SYNC: () = is_sync::<MultiWakerRegistrar<CriticalSectionRawMutex>>();

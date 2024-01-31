@@ -7,5 +7,5 @@ pub use atomic_waker::*;
 mod waker_registration;
 pub use waker_registration::*;
 
-mod multi_waker;
-pub use multi_waker::*;
+// mod multi_waker;
+// pub use multi_waker::*;
