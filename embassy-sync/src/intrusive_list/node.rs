@@ -1,4 +1,5 @@
 use core::marker::PhantomPinned;
+use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
@@ -6,7 +7,7 @@ pub(super) struct AtomicNodePtr(AtomicPtr<Node>);
 
 impl AtomicNodePtr {
     pub const fn new() -> Self {
-        AtomicNodePtr(AtomicPtr::new(Self::UNLINKED_MARKER))
+        AtomicNodePtr(AtomicPtr::new(NodeLink::UNLINKED_MARKER))
     }
 
     pub fn into_inner(self) -> NodeLink {
@@ -16,16 +17,12 @@ impl AtomicNodePtr {
     #[inline]
     pub fn get(&self) -> NodeLink {
         let ptr = self.0.load(AtomicOrdering::SeqCst);
-        if ptr.is_null() || ptr == Self::UNLINKED_MARKER {
-            None
-        } else {
-            Some(NodePtr(ptr))
-        }
+        NodeLink::from_node_ptr(ptr)
     }
 
     #[inline]
     pub fn set_link(&self, ptr: NodePtr) -> NodeLink {
-        let ptr = self.0.swap(ptr, AtomicOrdering::SeqCst);
+        let ptr = self.0.swap(ptr.0.as_ptr(), AtomicOrdering::SeqCst);
         NodeLink::from_node_ptr(ptr)
     }
 
@@ -58,11 +55,11 @@ impl NodeLink {
         match ptr {
             Self::UNLINKED_MARKER => Self::Unlinked,
             Self::END_MARKER => Self::End,
-            p => Self::Ptr(p),
+            p => Self::Ptr(NodePtr(NonNull::new(p).unwrap())),
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn to_node_ptr(self) -> *mut Node {
         match self {
             Self::Unlinked => Self::UNLINKED_MARKER,
@@ -72,28 +69,61 @@ impl NodeLink {
     }
 
     #[inline(always)]
-    pub(super) fn expect_end(self) {
+    pub(super) fn expect_node(self, node: Pin<&Node>) {
         match self {
-            NodeLink::End => {
+            NodeLink::Ptr(ptr) if ptr == NodePtr::from_ref(node) => (),
+            _ => {
                 #[cfg(debug_assertions)]
-                panic!("Expected end marker");
+                panic!("Expected node to be linked to {:?}", node.as_ptr());
                 #[cfg(not(debug_assertions))]
                 unreachable!()
             }
-            _ => (),
+        }
+    }
+
+    /// Converts to an option, expected the node to be linked
+    ///
+    /// # Safety
+    ///
+    /// - Expects the node to be linked.
+    ///
+    /// # Panic
+    ///
+    /// - Panics if the node was unlinked in debug mode.
+    #[inline]
+    pub fn expect_linked(self) -> Option<NodePtr> {
+        match self {
+            NodeLink::Ptr(ptr) => Some(ptr),
+            NodeLink::End => None,
+            NodeLink::Unlinked => {
+                #[cfg(debug_assertions)]
+                panic!("Expected node to be linked");
+                #[cfg(not(debug_assertions))]
+                unreachable!()
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn expect_end(self) {
+        if let NodeLink::End = self {
+            #[cfg(debug_assertions)]
+            panic!("Expected end marker");
+            #[cfg(not(debug_assertions))]
+            unreachable!()
         }
     }
 
     #[inline(always)]
     pub(super) fn expect_unlinked(self) {
         match self {
-            NodeLink::Unlinked => {
+            NodeLink::Unlinked => (),
+            _ => {
                 #[cfg(debug_assertions)]
                 panic!("Expected unlinked");
                 #[cfg(not(debug_assertions))]
                 unreachable!()
             }
-            _ => (),
         }
     }
 }
@@ -114,8 +144,8 @@ impl Node {
     }
 
     #[inline(always)]
-    pub fn as_ptr(&self) -> NodePtr {
-        NodePtr(core::ptr::NonNull::from(self))
+    pub fn as_ptr(self: Pin<&Self>) -> NodePtr {
+        NodePtr::from_ref(self)
     }
 
     #[inline]
@@ -124,31 +154,49 @@ impl Node {
     }
 
     #[inline]
+    pub unsafe fn prev_ref(self: Pin<&Self>) -> Option<Pin<&Self>> {
+        if let Some(prev) = self.prev().expect_linked() {
+            Some(Pin::new_unchecked(prev.0.as_ref()))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn next(&self) -> NodeLink {
         self.next.get()
     }
 
+    #[inline]
+    pub unsafe fn next_ref(self: Pin<&Self>) -> Option<Pin<&Self>> {
+        if let Some(next) = self.next().expect_linked() {
+            Some(Pin::new_unchecked(next.0.as_ref()))
+        } else {
+            None
+        }
+    }
+
     /// Sets the previous link to the specified node.
     #[inline]
-    pub fn update_prev(&self, ptr: &Self) -> NodeLink {
-        self.prev.set(NodeLink::Ptr(ptr.as_ptr()))
+    pub fn set_prev(&self, prev: Pin<&Self>) -> NodeLink {
+        self.prev.set_link(NodePtr::from_ref(prev))
     }
 
     /// Sets the next link to the specified node.
     #[inline]
-    pub fn update_next(&self, ptr: &Self) -> NodeLink {
-        self.next.set(NodeLink::Ptr(ptr.as_ptr()))
+    pub fn set_next(&self, next: Pin<&Self>) -> NodeLink {
+        self.next.set_link(NodePtr::from_ref(next))
     }
 
     /// Sets the previous link to the end marker.
     #[inline]
-    pub fn unlink_prev(&self) -> NodeLink {
+    pub fn set_prev_end(&self) -> NodeLink {
         self.prev.set_end()
     }
 
     /// Sets the next link to the end marker.
     #[inline]
-    pub fn unlink_next(&self) -> NodeLink {
+    pub fn set_next_end(&self) -> NodeLink {
         self.next.set_end()
     }
 
@@ -172,14 +220,16 @@ impl Node {
         ptr_read.into_links()
     }
 
-    /// Unlinks this node from the node before and after it.
+    /// Unlinks this node from the node before and after it,
+    /// and stitches them together.
     ///
     /// Safety:
     ///
     ///  - Must be safe to create a shared reference to the node before
-    ///  and after.
+    ///  and after, if it is linked.
+    ///  - If the node is unlinked, it is safe to call this at any time.
     #[inline]
-    pub unsafe fn unlink(&self) {
+    pub unsafe fn unlink(self: Pin<&Self>) {
         let links = self.as_links();
 
         self.prev.clear();
@@ -188,83 +238,19 @@ impl Node {
         match links {
             NodeLinks::Unlinked => (),
             NodeLinks::Single => (),
-            NodeLinks::Head { next } => next.get().unlink_prev(),
-            NodeLinks::Tail { prev } => prev.get().unlink_next(),
+            NodeLinks::Head { next } => {
+                next.get().set_prev_end();
+            }
+            NodeLinks::Tail { prev } => {
+                prev.get().set_next_end();
+            }
             NodeLinks::Full { prev, next } => {
                 let prev = prev.get();
                 let next = next.get();
-                prev.update_next(next);
-                next.update_prev(prev);
+                prev.set_next(next);
+                next.set_prev(prev);
             }
         }
-    }
-
-    /// Inserts this node into an empty list
-    ///
-    /// Safety:
-    ///
-    ///  - This node must have been previously unlinked
-    #[inline]
-    pub unsafe fn insert_empty(&self) {
-        self.prev.set_end().expect_unlinked();
-        self.next.set_end().expect_unlinked();
-    }
-
-    /// Inserts self as the head of the list, and updates the old head's links.
-    ///
-    /// Safety:
-    ///
-    ///  - This node must have been previously unlinked
-    #[inline]
-    pub unsafe fn insert_head(&self, old_head: &Self) {
-        old_head.update_prev(self).expect_end();
-        self.next.set_link(old_head.as_ptr()).expect_unlinked();
-        self.prev.set_end().expect_unlinked();
-    }
-
-    /// Inserts self as the head of the list, and updates the old head's links.
-    ///
-    /// Safety:
-    ///
-    ///  - This node must have been previously unlinked
-    #[inline]
-    pub unsafe fn insert_tail(&self, old_tail: &Self) {
-        old_tail.update_next(self);
-        self.prev.set_link(old_tail).expect_unlinked();
-        self.next.set_end().expect_unlinked();
-    }
-
-    /// Inserts self between two other nodes
-    #[inline]
-    pub unsafe fn insert_between(&self, prev: &Self, next: &Self) {
-        self.update_prev(prev).expect_unlinked();
-        prev.update_next(self);
-        self.update_next(next).expect_unlinked();
-        next.update_prev(self);
-    }
-
-    pub unsafe fn update_links(&self, links: NodeLinks) -> NodeLinks {
-        core::mem::replace(&mut *self.get_links_mut(), links)
-    }
-
-    /// Clears the current nodes links and stitches the list
-    /// together.
-    #[inline]
-    pub unsafe fn remove(&self) -> NodeLinks {
-        let l = self.get_links_mut().clear();
-
-        match &l {
-            NodeLinks::Unlinked => (),
-            NodeLinks::Single => (),
-            NodeLinks::Head { next } => next.clear_prev(),
-            NodeLinks::Tail { prev, .. } => prev.clear_next(),
-            NodeLinks::Full { prev, next } => {
-                next.set_prev(*prev);
-                prev.set_next(*next);
-            }
-        }
-
-        l
     }
 }
 
@@ -287,11 +273,18 @@ pub(super) enum NodeLinks {
 
 impl NodeLinks {
     #[inline]
+    pub fn is_head(&self) -> bool {
+        matches!(self, Self::Head { .. })
+    }
+
+    #[inline]
+    pub fn is_tail(&self) -> bool {
+        matches!(self, Self::Tail { .. })
+    }
+
+    #[inline]
     pub fn is_linked(&self) -> bool {
-        match self {
-            Self::Unlinked => false,
-            _ => true,
-        }
+        !matches!(self, Self::Unlinked)
     }
 
     #[inline]
@@ -316,8 +309,12 @@ pub(super) struct NodePtr(NonNull<Node>);
 
 impl NodePtr {
     #[inline(always)]
-    pub unsafe fn get(&self) -> &Node {
-        unsafe { self.0.as_ref() }
+    pub unsafe fn get<'n>(&self) -> Pin<&'n Node> {
+        unsafe { Pin::new_unchecked(self.0.as_ref()) }
+    }
+
+    pub fn from_ref(node: Pin<&Node>) -> Self {
+        Self(NonNull::from(Pin::get_ref(node)))
     }
 }
 

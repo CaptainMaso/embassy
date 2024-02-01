@@ -7,9 +7,9 @@ use core::ops::{Deref, DerefMut};
 use core::pin::pin;
 use core::task::Poll;
 
-use crate::blocking_mutex::raw::RawMutex;
+use crate::blocking_mutex::raw::{ConstRawMutex, RawMutex};
 use crate::blocking_mutex::Mutex as BlockingMutex;
-use crate::waitqueue::{MultiWakerRegistrar, MultiWakerRegistration, MultiWakerStorage};
+use crate::waitqueue::{MultiWaker, MultiWakerStore};
 
 /// Error returned by [`Mutex::try_lock`]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -40,7 +40,7 @@ where
     M: RawMutex,
     T: ?Sized,
 {
-    wakers: MultiWakerRegistrar<M>,
+    wakers: MultiWaker<M>,
     state: BlockingMutex<M, RefCell<State>>,
     inner: UnsafeCell<T>,
 }
@@ -54,11 +54,14 @@ where
     M: RawMutex,
 {
     /// Create a new mutex with the given value.
-    pub const fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self
+    where
+        M: ConstRawMutex,
+    {
         Self {
             inner: UnsafeCell::new(value),
             state: BlockingMutex::new(RefCell::new(State { locked: false })),
-            wakers: MultiWakerRegistrar::new(),
+            wakers: MultiWaker::new(),
         }
     }
 }
@@ -72,16 +75,12 @@ where
     ///
     /// This will wait for the mutex to be unlocked if it's already locked.
     pub async fn lock(&self) -> MutexGuard<'_, M, T> {
-        let mut store = MultiWakerStorage::new();
-        let store = pin!(store);
-        let mut reg = None;
+        let mut store = self.wakers.store();
+        let mut store = pin!(store);
         poll_fn(|cx| {
-            let reg = reg.get_or_insert_with(|| self.wakers.register(store, cx.waker()));
-            self.wakers.update(reg, waker);
             let ready = self.state.lock(|s| {
                 let mut s = s.borrow_mut();
                 if s.locked {
-                    s.waker.register(cx.waker());
                     false
                 } else {
                     s.locked = true;
@@ -92,6 +91,7 @@ where
             if ready {
                 Poll::Ready(MutexGuard { mutex: self })
             } else {
+                self.wakers.update(store.as_mut(), cx.waker());
                 Poll::Pending
             }
         })
@@ -155,8 +155,8 @@ where
         self.mutex.state.lock(|s| {
             let mut s = unwrap!(s.try_borrow_mut());
             s.locked = false;
-            s.waker.wake();
-        })
+        });
+        self.mutex.wakers.wake();
     }
 }
 

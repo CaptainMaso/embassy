@@ -6,14 +6,14 @@ use core::cell::UnsafeCell;
 use cfg_if::cfg_if;
 
 #[cfg(debug_assertions)]
-pub type Ref<'a, T: ?Sized> = core::cell::Ref<'a, T>;
+pub type DebugRef<'a, T> = core::cell::Ref<'a, T>;
 #[cfg(debug_assertions)]
-pub type RefMut<'a, T: ?Sized> = core::cell::RefMut<'a, T>;
+pub type DebugRefMut<'a, T> = core::cell::RefMut<'a, T>;
 
 #[cfg(not(debug_assertions))]
-pub type Ref<'a, T: ?Sized> = &'a T;
+pub type Ref<'a, T> = &'a T;
 #[cfg(not(debug_assertions))]
-pub type RefMut<'a, T: ?Sized> = &'a mut T;
+pub type RefMut<'a, T> = &'a mut T;
 
 #[derive(Debug)]
 pub struct DebugCell<T: ?Sized> {
@@ -84,7 +84,7 @@ impl<T: ?Sized> DebugCell<T> {
     /// SAFETY: Requires the caller to ensure no other unique references
     /// exist to the inner data.
     #[inline(always)]
-    pub unsafe fn borrow(&self) -> Ref<'_, T> {
+    pub unsafe fn borrow(&self) -> DebugRef<'_, T> {
         cfg_if!(
             if #[cfg(debug_assertions)] {
                 #[inline(always)]
@@ -108,7 +108,7 @@ impl<T: ?Sized> DebugCell<T> {
     /// SAFETY: Requires the caller to ensure no other shared references
     /// exist to the inner data
     #[inline(always)]
-    pub unsafe fn borrow_mut(&self) -> RefMut<'_, T> {
+    pub unsafe fn borrow_mut(&self) -> DebugRefMut<'_, T> {
         cfg_if!(
             if #[cfg(debug_assertions)] {
                 #[inline(always)]

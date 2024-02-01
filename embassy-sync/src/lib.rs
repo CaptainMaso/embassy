@@ -18,7 +18,7 @@ pub mod channel;
 mod debug_cell;
 pub mod deque;
 pub mod intrusive_list;
-//pub mod mutex;
+pub mod mutex;
 pub mod pipe;
 pub mod priority_channel;
 //pub mod pubsub;

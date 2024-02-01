@@ -189,3 +189,15 @@ mod thread_mode_mutex {
         }
     }
 }
+
+#[cfg(feature = "std")]
+mod std_mutex {
+    use super::*;
+
+    unsafe impl RawMutex for std::sync::Mutex<()> {
+        fn lock<R>(&self, f: impl FnOnce() -> R) -> R {
+            let _g = self.lock().unwrap();
+            f()
+        }
+    }
+}

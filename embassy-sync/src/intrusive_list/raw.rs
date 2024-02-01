@@ -1,240 +1,134 @@
+use core::pin::Pin;
+
 use super::*;
 
 pub struct RawIntrusiveList {
-    pub(super) len: usize,
-    pub(super) links: Option<HeadTail>,
-}
-
-pub(super) struct HeadTail {
-    pub head: NodePtr,
-    pub tail: NodePtr,
+    pub len: usize,
+    pub head: Option<NodePtr>,
+    pub tail: Option<NodePtr>,
 }
 
 impl RawIntrusiveList {
     pub const fn new() -> Self {
-        Self { len: 0, links: None }
+        Self {
+            len: 0,
+            head: None,
+            tail: None,
+        }
     }
 
-    pub(super) fn cursor(&mut self) -> RawCursor<'_> {
-        let head = self.get_head().map(|n| (0, n));
-        RawCursor {
-            list: self,
-            current: head,
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        if self.head.is_some() && self.tail.is_some() {
+            self.len
+        } else {
+            0
         }
     }
 
     #[inline(always)]
-    pub(super) fn get_head(&self) -> Option<NodePtr> {
-        self.links.as_ref().map(|l| l.head)
+    pub fn head(&mut self) -> Option<Pin<&Node>> {
+        self.head.as_ref().map(|n| unsafe { n.get() })
+    }
+
+    #[inline(always)]
+    pub fn tail(&mut self) -> Option<Pin<&Node>> {
+        self.tail.as_ref().map(|n| unsafe { n.get() })
     }
 
     /// Inserts a node at the head
     #[inline]
-    pub(super) fn insert_head(&mut self, head: NodePtr) {
-        unsafe { head.update_links(NodeLinks::Single) };
-        if let Some(l) = self.links.as_mut() {
-            let old_head = core::mem::replace(&mut l.head, head);
-            unsafe {
-                old_head.insert_before(head);
-            }
+    pub fn insert_head(&mut self, new_head: Pin<&Node>) {
+        unsafe { new_head.unlink() };
+        if let Some(old_head) = self.head() {
+            new_head.set_next(old_head).expect_unlinked();
+            old_head.set_prev(new_head).expect_end();
+            new_head.set_prev_end().expect_unlinked();
+            self.head = Some(NodePtr::from_ref(new_head));
         } else {
-            self.links = Some(HeadTail { head, tail: head });
+            new_head.set_next_end();
+            new_head.set_prev_end();
+            let ptr = NodePtr::from_ref(new_head);
+            self.head = Some(ptr);
+            self.tail = Some(ptr);
         }
-    }
-
-    #[inline(always)]
-    pub(super) fn get_tail(&self) -> Option<NodePtr> {
-        self.links.as_ref().map(|l| l.tail)
+        self.len += 1;
     }
 
     /// Inserts a new node at the tail.
     #[inline]
-    pub(super) fn insert_tail(&mut self, tail: NodePtr) {
-        unsafe { tail.update_links(NodeLinks::Single) };
-        if let Some(l) = self.links.as_mut() {
-            let old_tail = core::mem::replace(&mut l.tail, tail);
-            unsafe {
-                old_tail.insert_after(tail);
-            }
+    pub fn insert_tail(&mut self, new_tail: Pin<&Node>) {
+        unsafe { new_tail.unlink() };
+        if let Some(old_tail) = self.tail() {
+            new_tail.set_prev(new_tail).expect_unlinked();
+            old_tail.set_next(new_tail).expect_end();
+            new_tail.set_prev_end().expect_unlinked();
+            self.tail = Some(NodePtr::from_ref(new_tail));
         } else {
-            self.links = Some(HeadTail { head: tail, tail });
+            new_tail.set_next_end();
+            new_tail.set_prev_end();
+            let ptr = NodePtr::from_ref(new_tail);
+            self.head = Some(ptr);
+            self.tail = Some(ptr);
         }
+        self.len += 1;
     }
 
-    pub(super) fn remove(&mut self, node: NodePtr) {
-        unsafe {
-            match node.remove() {
-                NodeLinks::Unlinked => {
-                    return;
-                }
-                NodeLinks::Single => {
-                    self.links = None;
-                    self.len = 0;
-                }
-                NodeLinks::Head { next } => {
-                    let Some(l) = &mut self.links else {
-                        self.len = 0;
-                        self.links = None;
-                        #[cfg(debug_assertions)]
-                        panic!("Linked List HeadTail was empty");
-                        #[cfg(not(debug_assertions))]
-                        unreachable!()
-                    };
-                    l.head = next;
-                }
-                NodeLinks::Tail { prev } => {
-                    let Some(l) = &mut self.links else {
-                        self.len = 0;
-                        self.links = None;
-                        #[cfg(debug_assertions)]
-                        panic!("Linked List HeadTail was empty");
-                        #[cfg(not(debug_assertions))]
-                        unreachable!()
-                    };
-                    l.tail = prev;
-                }
-                NodeLinks::Full { .. } => {}
-            }
-            self.len = self.len.saturating_sub(1);
-        }
-    }
-}
-
-pub(super) struct RawCursor<'a> {
-    list: &'a mut RawIntrusiveList,
-    current: Option<(usize, NodePtr)>,
-}
-
-impl<'a> RawCursor<'a> {
-    pub fn current(&mut self) -> Option<&mut (usize, NodePtr)> {
-        if self.current.is_none() {
-            let head = self.list.get_head()?;
-            Some(self.current.insert((0, head)))
-        } else {
-            Some(self.current.as_mut().unwrap())
-        }
+    /// Inserts self between two other nodes
+    #[inline]
+    pub fn insert_between(&mut self, prev: Pin<&Node>, new: Pin<&Node>, next: Pin<&Node>) {
+        unsafe { new.unlink() };
+        new.set_prev(prev).expect_unlinked();
+        new.set_next(next).expect_unlinked();
+        prev.set_next(new).expect_node(next);
+        next.set_prev(new).expect_node(prev);
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
-        if self.current.is_none() {
-            return 0;
-        }
-        self.list.len
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.list.len == 0 || self.current.is_none()
-    }
-
-    #[inline]
-    pub fn idx(&self) -> usize {
-        self.current.map(|(i, _)| i).unwrap_or(0)
-    }
-
-    #[inline]
-    pub fn is_head(&self) -> bool {
-        self.current.map(|(idx, _)| idx == 0).unwrap_or(false)
-    }
-
-    #[inline]
-    pub fn is_tail(&self) -> bool {
-        self.current
-            .map(|(idx, _)| idx == self.len().saturating_sub(1))
-            .unwrap_or(false)
-    }
-
-    /// Moves the cursor to the next item in the list.
-    /// Wraps to the head of the list if it reaches the end.
-    #[inline]
-    pub fn next(&mut self) {
-        let next = self.current.and_then(|(idx, n)| {
-            let n = unsafe { n.next() };
-            n.map(|n| (idx + 1, n))
-        });
-
-        self.current = next;
-    }
-
-    /// Moves the cursor to the previous item in the list.
-    /// Wraps to the tail of the list if it reaches the end.
-    #[inline]
-    pub fn prev(&mut self) {
-        let prev = self
-            .current
-            .and_then(|(idx, n)| {
-                let n = unsafe { n.prev() };
-                n.map(|n| (idx - 1, n))
-            })
-            .or_else(|| self.list.get_tail().map(|n| (self.len() - 1, n)));
-
-        self.current = prev;
-    }
-
-    /// Moves the cursor to the head of the list.
-    #[inline]
-    pub fn head(&mut self) {
-        self.current = self.list.get_head().map(|n| (0, n));
-    }
-
-    /// Moves the cursor to the tail of the list.
-    #[inline]
-    pub fn tail(&mut self) {
-        self.current = self.list.get_tail().map(|n| (self.len() - 1, n));
-    }
-
-    #[inline]
-    pub fn insert_head(&mut self, node: NodePtr) {
-        self.list.insert_head(node);
-        self.list.len += 1;
-        if self.current.is_none() {
-            self.current = Some((0, node));
-        }
-    }
-
-    #[inline]
-    pub fn insert_tail(&mut self, node: NodePtr) {
-        self.list.insert_tail(node);
-        self.list.len += 1;
-        if self.current.is_none() {
-            self.current = Some((0, node));
-        }
-    }
-
-    #[inline]
-    pub fn insert_after(&mut self, node: NodePtr) {
-        if let Some((idx, cur)) = self.current {
-            unsafe {
-                cur.insert_after(node);
-            }
-            self.list.len += 1;
+    pub fn insert_after(&mut self, cursor: Pin<&Node>, node: Pin<&Node>) {
+        unsafe { node.unlink() };
+        if let Some(next) = unsafe { cursor.next_ref() } {
+            self.insert_between(cursor, node, next);
         } else {
             self.insert_tail(node);
         }
     }
 
     #[inline]
-    pub fn insert_before(&mut self, node: NodePtr) {
-        if let Some((idx, cur)) = &mut self.current {
-            unsafe {
-                cur.insert_before(node);
-            }
-            self.list.len += 1;
+    pub fn insert_before(&mut self, cursor: Pin<&Node>, node: Pin<&Node>) {
+        unsafe { node.unlink() };
+        if let Some(prev) = unsafe { cursor.prev_ref() } {
+            self.insert_between(prev, node, cursor);
         } else {
-            self.insert_head(node);
+            self.insert_tail(node);
         }
     }
 
-    /// Removes the current item from the list, and moves the cursor to point at the previous item.
-    ///
-    /// If the item was the head of the list, the cursor is moved to the new head of the list.
-    #[inline]
-    pub fn remove(&mut self) {
-        if let Some((idx, n)) = self.current.take() {
-            let next = unsafe { n.prev().map(|n| (idx - 1, n)).or_else(|| n.next().map(|n| (idx, n))) };
-            self.list.remove(n);
-            self.current = next;
+    pub(super) fn remove(&mut self, node: Pin<&Node>) {
+        let links = node.as_links();
+        unsafe {
+            node.unlink();
         }
+        match links {
+            NodeLinks::Unlinked => return,
+            NodeLinks::Single => {
+                self.head = None;
+                self.tail = None;
+                self.len = 0;
+            }
+            NodeLinks::Head { next } => {
+                self.head = Some(next);
+            }
+            NodeLinks::Tail { prev } => {
+                self.tail = Some(prev);
+            }
+            NodeLinks::Full { prev, next } => {
+                // Don't need to update any of our values, just unlink the removed node.
+            }
+        }
+        self.len = self.len.saturating_sub(1);
     }
 }

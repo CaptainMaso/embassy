@@ -157,3 +157,6 @@ mod thread_mode {
 }
 #[cfg(any(cortex_m, feature = "std"))]
 pub use thread_mode::*;
+
+#[cfg(feature = "lock_api")]
+mod lock_api {}
