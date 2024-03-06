@@ -69,6 +69,7 @@ static mut EXECUTOR: Option<Executor> = None;
 
 foreach_interrupt! {
     (RTC, rtc, $block:ident, WKUP, $irq:ident) => {
+        #[cfg(feature="rt")]
         #[interrupt]
         #[allow(non_snake_case)]
         unsafe fn $irq() {

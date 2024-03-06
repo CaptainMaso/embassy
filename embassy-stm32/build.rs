@@ -184,6 +184,7 @@ fn main() {
 
     let time_driver_singleton = match time_driver.as_ref().map(|x| x.as_ref()) {
         None => "",
+        Some("systick") => "SYSTICK",
         Some("tim1") => "TIM1",
         Some("tim2") => "TIM2",
         Some("tim3") => "TIM3",

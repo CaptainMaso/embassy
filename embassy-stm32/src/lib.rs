@@ -19,6 +19,7 @@ pub mod time;
 mod traits;
 
 // Always-present hardware
+//pub mod delay;
 pub mod dma;
 pub mod gpio;
 pub mod rcc;
@@ -296,3 +297,7 @@ pub fn init(config: Config) -> Peripherals {
         p
     })
 }
+
+trait Captures<U> {}
+
+impl<T: ?Sized, U> Captures<U> for T {}

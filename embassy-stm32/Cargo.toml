@@ -80,6 +80,7 @@ embedded-io = { version = "0.6.0" }
 embedded-io-async = { version = "0.6.1" }
 chrono = { version = "^0.4", default-features = false, optional = true}
 bit_field = "0.10.2"
+bitflags = "2.4.2"
 document-features = "0.2.7"
 
 static_assertions = { version = "1.1" }
@@ -127,6 +128,8 @@ time = ["dep:embassy-time"]
 # Features starting with `_` are for internal use only. They're not intended
 # to be enabled by other crates, and are not covered by semver guarantees.
 _time-driver = ["dep:embassy-time-driver", "time"]
+
+time-driver-systick = ["_time-driver"]
 
 ## Use any time driver
 time-driver-any = ["_time-driver"]

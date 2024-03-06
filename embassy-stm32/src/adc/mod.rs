@@ -27,20 +27,20 @@ use crate::peripherals;
 pub struct Adc<'d, T: Instance> {
     #[allow(unused)]
     adc: crate::PeripheralRef<'d, T>,
-    #[cfg(not(any(adc_f3_v2, adc_f3_v1_1)))]
+    #[cfg(not(any(adc_f3_v2, adc_f3_v1_1, adc_v3)))]
     sample_time: SampleTime,
 }
 
 pub(crate) mod sealed {
-    #[cfg(any(adc_f1, adc_f3, adc_v1, adc_l0, adc_f3_v1_1))]
+    #[cfg(any(adc_f1, adc_f3, adc_l0, adc_v1, adc_v3, adc_f3_v1_1))]
     use embassy_sync::waitqueue::AtomicWaker;
 
-    #[cfg(any(adc_f1, adc_f3, adc_v1, adc_l0, adc_f3_v1_1))]
+    #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
     pub struct State {
         pub waker: AtomicWaker,
     }
 
-    #[cfg(any(adc_f1, adc_f3, adc_v1, adc_l0, adc_f3_v1_1))]
+    #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
     impl State {
         pub const fn new() -> Self {
             Self {
@@ -57,7 +57,7 @@ pub(crate) mod sealed {
         fn regs() -> crate::pac::adc::Adc;
         #[cfg(not(any(adc_f1, adc_v1, adc_l0, adc_f3_v2, adc_f3_v1_1, adc_g0)))]
         fn common_regs() -> crate::pac::adccommon::AdcCommon;
-        #[cfg(any(adc_f1, adc_f3, adc_v1, adc_l0, adc_f3_v1_1))]
+        #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
         fn state() -> &'static State;
     }
 
@@ -97,7 +97,7 @@ foreach_adc!(
                 return crate::pac::$common_inst
             }
 
-            #[cfg(any(adc_f1, adc_f3, adc_v1, adc_l0, adc_f3_v1_1))]
+            #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
             fn state() -> &'static sealed::State {
                 static STATE: sealed::State = sealed::State::new();
                 &STATE

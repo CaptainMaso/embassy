@@ -16,10 +16,11 @@
   "rust-analyzer.cargo.target": "thumbv7em-none-eabi",
   //"rust-analyzer.cargo.target": "thumbv8m.main-none-eabihf",
   "rust-analyzer.cargo.features": [
-    "stm32f103c8",
-    "time-driver-any",
+    "stm32l452ce",
+    "time-driver-tim2",
     "unstable-pac",
     "exti",
+    "low-power"
   ],
   "rust-analyzer.linkedProjects": [
     // Uncomment ONE line for the chip you want to work on.
