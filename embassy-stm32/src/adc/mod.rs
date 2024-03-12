@@ -3,6 +3,13 @@
 #![macro_use]
 #![allow(missing_docs)] // TODO
 
+#[cfg(any(adc_v1_1, adc_v3))]
+mod common;
+
+use cfg_if::cfg_if;
+#[cfg(any(adc_v1_1, adc_v3))]
+pub use common::*;
+
 #[cfg(not(adc_f3_v2))]
 #[cfg_attr(adc_f1, path = "f1.rs")]
 #[cfg_attr(adc_f3, path = "f3.rs")]
@@ -32,8 +39,14 @@ pub struct Adc<'d, T: Instance> {
 }
 
 pub(crate) mod sealed {
+    use embassy_futures::yield_now;
     #[cfg(any(adc_f1, adc_f3, adc_l0, adc_v1, adc_v3, adc_f3_v1_1))]
     use embassy_sync::waitqueue::AtomicWaker;
+
+    use super::{
+        common::{AdcCal, Error, RawValue},
+        AdcConfig, PinConfig,
+    };
 
     #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
     pub struct State {
@@ -53,12 +66,53 @@ pub(crate) mod sealed {
         type Interrupt: crate::interrupt::typelevel::Interrupt;
     }
 
-    pub trait Instance: InterruptableInstance {
+    pub trait Instance: InterruptableInstance + Sized {
         fn regs() -> crate::pac::adc::Adc;
         #[cfg(not(any(adc_f1, adc_v1, adc_l0, adc_f3_v2, adc_f3_v1_1, adc_g0)))]
         fn common_regs() -> crate::pac::adccommon::AdcCommon;
         #[cfg(any(adc_f1, adc_f3, adc_v1, adc_v3, adc_l0, adc_f3_v1_1))]
         fn state() -> &'static State;
+    }
+
+    pub trait AdcImpl: Instance {
+        /// VREF voltage used for factory calibration of VREFINTCAL register.
+        const VREF_CALIB_UV: u32;
+
+        type Events;
+
+        async fn init();
+
+        /// Returns true if the ADC is awake and ready to perform conversions
+        fn is_awake() -> bool;
+
+        /// Returns true if the ADC currently performing conversions
+        fn is_running() -> bool;
+
+        async fn wake();
+        async fn sleep();
+
+        async fn start_vref();
+        fn stop_vref();
+        fn vref_factory_cal() -> RawValue;
+
+        fn take_events(interest: Self::Events) -> Self::Events;
+        fn clear_events(interest: Self::Events);
+        fn set_interest(interest: Self::Events);
+        async fn wait_for_events(interest: Self::Events) -> Self::Events;
+
+        async fn set_sequence(channel: &[u8]);
+
+        async fn set_config(config: AdcConfig) -> Result<(), Error>;
+        fn get_config() -> AdcConfig;
+
+        async fn set_pin_cfg(pin: u8, cfg: PinConfig) -> Result<(), Error>;
+        fn get_pin_cfg(pin: u8) -> PinConfig;
+
+        async fn start_conversions();
+        fn stop_conversions();
+
+        /// Reads a single value from the DR when ready
+        async fn read_single() -> Result<u16, Error>;
     }
 
     pub trait AdcPin<T: Instance> {
@@ -78,7 +132,7 @@ pub(crate) mod sealed {
 pub trait Instance: sealed::Instance + crate::Peripheral<P = Self> {}
 /// ADC instance.
 #[cfg(any(adc_f1, adc_v1, adc_l0, adc_v2, adc_v3, adc_v4, adc_f3, adc_f3_v1_1, adc_g0, adc_h5))]
-pub trait Instance: sealed::Instance + crate::Peripheral<P = Self> + crate::rcc::RccPeripheral {}
+pub trait Instance: sealed::AdcImpl + crate::Peripheral<P = Self> + crate::rcc::RccPeripheral {}
 
 /// ADC pin.
 pub trait AdcPin<T: Instance>: sealed::AdcPin<T> {}
@@ -131,28 +185,4 @@ macro_rules! impl_adc_pin {
             }
         }
     };
-}
-
-/// Get the maximum reading value for this resolution.
-///
-/// This is `2**n - 1`.
-#[cfg(not(any(adc_f1, adc_f3_v2)))]
-pub const fn resolution_to_max_count(res: Resolution) -> u32 {
-    match res {
-        #[cfg(adc_v4)]
-        Resolution::BITS16 => (1 << 16) - 1,
-        #[cfg(adc_v4)]
-        Resolution::BITS14 => (1 << 14) - 1,
-        #[cfg(adc_v4)]
-        Resolution::BITS14V => (1 << 14) - 1,
-        #[cfg(adc_v4)]
-        Resolution::BITS12V => (1 << 12) - 1,
-        Resolution::BITS12 => (1 << 12) - 1,
-        Resolution::BITS10 => (1 << 10) - 1,
-        Resolution::BITS8 => (1 << 8) - 1,
-        #[cfg(any(adc_v1, adc_v2, adc_v3, adc_l0, adc_g0, adc_f3, adc_f3_v1_1, adc_h5))]
-        Resolution::BITS6 => (1 << 6) - 1,
-        #[allow(unreachable_patterns)]
-        _ => core::unreachable!(),
-    }
 }

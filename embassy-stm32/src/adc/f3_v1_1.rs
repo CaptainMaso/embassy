@@ -12,30 +12,13 @@ use crate::interrupt::typelevel::Interrupt;
 use crate::time::Hertz;
 use crate::{interrupt, Peripheral};
 
+use super::common::*;
+
 const ADC_FREQ: Hertz = crate::rcc::HSI_FREQ;
 
 pub const VDDA_CALIB_MV: u32 = 3300;
 pub const ADC_MAX: u32 = (1 << 12) - 1;
 pub const VREF_INT: u32 = 1230;
-
-pub enum AdcPowerMode {
-    AlwaysOn,
-    DelayOff,
-    IdleOff,
-    DelayIdleOff,
-}
-
-pub enum Prescaler {
-    Div1,
-    Div2,
-    Div3,
-    Div4,
-}
-
-/// Interrupt handler.
-pub struct InterruptHandler<T: Instance> {
-    _phantom: PhantomData<T>,
-}
 
 impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
@@ -49,91 +32,18 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
     }
 }
 
-fn update_vref<T: Instance>(op: i8) {
-    static VREF_STATUS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
-    if op > 0 {
-        if VREF_STATUS.fetch_add(1, core::sync::atomic::Ordering::SeqCst) == 0 {
-            T::regs().ccr().modify(|w| w.set_tsvrefe(true));
-        }
-    } else {
-        if VREF_STATUS.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1 {
-            T::regs().ccr().modify(|w| w.set_tsvrefe(false));
-        }
-    }
+pub enum AdcPowerMode {
+    AlwaysOn,
+    DelayOff,
+    IdleOff,
+    DelayIdleOff,
 }
 
-pub struct Vref<T: Instance>(core::marker::PhantomData<T>);
-impl<T: Instance> AdcPin<T> for Vref<T> {}
-impl<T: Instance> super::sealed::AdcPin<T> for Vref<T> {
-    fn channel(&self) -> u8 {
-        17
-    }
-}
-
-impl<T: Instance> Vref<T> {
-    /// The value that vref would be if vdda was at 3000mv
-    pub fn calibrated_value(&self) -> u16 {
-        crate::pac::VREFINTCAL.data().read().value()
-    }
-
-    pub async fn calibrate(&mut self, adc: &mut Adc<'_, T>) -> Calibration {
-        let vref_val = adc.read(self).await;
-        Calibration {
-            vref_cal: self.calibrated_value(),
-            vref_val,
-        }
-    }
-}
-
-pub struct Calibration {
-    vref_cal: u16,
-    vref_val: u16,
-}
-
-impl Calibration {
-    /// The millivolts that the calibration value was measured at
-    pub const CALIBRATION_UV: u32 = 3_000_000;
-
-    /// Returns the measured VddA in microvolts (uV)
-    pub fn vdda_uv(&self) -> u32 {
-        (Self::CALIBRATION_UV * self.vref_cal as u32) / self.vref_val as u32
-    }
-
-    /// Returns the measured VddA as an f32
-    pub fn vdda_f32(&self) -> f32 {
-        (Self::CALIBRATION_UV as f32 / 1_000.0) * (self.vref_cal as f32 / self.vref_val as f32)
-    }
-
-    /// Returns a calibrated voltage value as in microvolts (uV)
-    pub fn cal_uv(&self, raw: u16, resolution: super::Resolution) -> u32 {
-        (self.vdda_uv() / super::resolution_to_max_count(resolution)) * raw as u32
-    }
-
-    /// Returns a calibrated voltage value as an f32
-    pub fn cal_f32(&self, raw: u16, resolution: super::Resolution) -> f32 {
-        raw as f32 * self.vdda_f32() / super::resolution_to_max_count(resolution) as f32
-    }
-}
-
-impl<T: Instance> Drop for Vref<T> {
-    fn drop(&mut self) {
-        update_vref::<T>(-1)
-    }
-}
-
-pub struct Temperature<T: Instance>(core::marker::PhantomData<T>);
-impl<T: Instance> AdcPin<T> for Temperature<T> {}
-impl<T: Instance> super::sealed::AdcPin<T> for Temperature<T> {
-    fn channel(&self) -> u8 {
-        16
-    }
-}
-
-impl<T: Instance> Drop for Temperature<T> {
-    fn drop(&mut self) {
-        update_vref::<T>(-1)
-    }
+pub enum Prescaler {
+    Div1,
+    Div2,
+    Div3,
+    Div4,
 }
 
 impl<'d, T: Instance> Adc<'d, T> {
